@@ -61,11 +61,7 @@ public class Server {
             // the server on which the stup is running
             System.setProperty("java.rmi.server.hostname", serverAddress);
 
-            GraphEngine engine = GraphEngine.loadFromFile(filename);
-            if (engine == null) {
-                System.out.println("Failed to load graph from file");
-                return;
-            }
+            GraphEngine engine = new GraphEngine(filename);
 
             // this server stup is registered with rmiregistry on port serverPort.
             GraphService stub = (GraphService) UnicastRemoteObject.exportObject(engine, serverPort);

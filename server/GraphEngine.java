@@ -2,6 +2,7 @@ import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileReader;
 import java.io.IOException;
+import java.rmi.RemoteException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -10,29 +11,34 @@ import java.util.List;
 import java.util.Map;
 import java.util.Queue;
 import java.util.Set;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 public class GraphEngine implements GraphService {
-    private final Map<Integer, Set<Integer>> adj; // adjacency list
-    private final Map<GraphService.Pair, Integer> precomputedPaths;
+    private Map<Integer, Set<Integer>> adj;
+    private Map<GraphService.Pair, Integer> precomputedPaths;
     private boolean precomputed;
-
-    /**
-     * Initializes the graph engine with an empty graph.
-     */
+    private final ReentrantReadWriteLock lock;
+    
+    
     public GraphEngine() {
-        this.adj = new HashMap<>();
-        this.precomputedPaths = new HashMap<>();
-        this.precomputed = false;
+        this(new HashMap<>());
     }
 
-    /**
-     * Initializes the graph engine with the given adjacency list.
-     * @param adj
-     */
+    public GraphEngine(String filename) {
+        this(new HashMap<>());
+        if (this.loadFromFile(filename)) {
+            this.computeAllPaths();
+        } else {
+            System.out.println("Failed to load graph from file");
+        }
+    }
+
+
     public GraphEngine(Map<Integer, Set<Integer>> adj) {
         this.adj = adj;
         this.precomputedPaths = new HashMap<>();
         this.precomputed = false;
+        this.lock = new ReentrantReadWriteLock(true);
     }
 
     /**
@@ -40,18 +46,24 @@ public class GraphEngine implements GraphService {
      * 
      * @param u the starting node
      * @param v the target node
-     * @return the shortest distance between u and v, or -1 if no path exists, or if u or v is not in the graph, or 0 if u == v.
+     * @return      the shortest distance between u and v,
+     *              or -1 if no path exists, or if u or v is not in the graph,
+     *              or 0 if u == v.
      */
     @Override
-    public int query(int u, int v) {
-        if (!precomputed) {
-            if (u == v) return 0;
-            Integer[] path = this.BreadthFirstSearch(u, v);
-            if (path == null) return -1;
-            return path.length - 1;
-        } else {
-            // TODO 1: later use the precomputedPaths map to get the distance
-            return -1;
+    public int query(int u, int v) throws RemoteException {
+        this.lock.readLock().lock(); // acquire read lock
+        try {
+            if (!precomputed) {
+                Integer[] path = this.BreadthFirstSearch(u, v);
+                if (path == null) return -1;
+                return path.length - 1;
+            } else {
+                return this.precomputedPaths.getOrDefault(new GraphService.Pair(u, v), -1);
+            }
+
+        } finally {
+            this.lock.readLock().unlock(); // release read lock
         }
     }
 
@@ -62,11 +74,16 @@ public class GraphEngine implements GraphService {
      * @param v the target node
     */
     @Override
-    public void addEdge(int u, int v) {
-        this.precomputed = false;
-        adj.putIfAbsent(u, new HashSet<>());
-        adj.putIfAbsent(v, new HashSet<>());
-        adj.get(u).add(v);
+    public void addEdge(int u, int v) throws RemoteException {
+        this.lock.writeLock().lock();
+        try {
+            this.precomputed = false;
+            adj.putIfAbsent(u, new HashSet<>());
+            adj.putIfAbsent(v, new HashSet<>());
+            adj.get(u).add(v);
+        } finally {
+            this.lock.writeLock().unlock();
+        }
     }
 
     /**
@@ -76,15 +93,41 @@ public class GraphEngine implements GraphService {
      * @param v the target node
      */
     @Override
-    public void deleteEdge(int u, int v) {
-        this.precomputed = false;
-        if (!adj.containsKey(u)) return;
-        adj.get(u).remove(v);
+    public void deleteEdge(int u, int v) throws RemoteException {
+        this.lock.writeLock().lock();
+        try {
+            this.precomputed = false;
+            if (!adj.containsKey(u)) return;
+            adj.get(u).remove(v);
+        } finally {
+            this.lock.writeLock().unlock();
+        }
+
     }
 
+
+    /**
+     * Processes a batch of operations and returns the results.
+     * 
+     * parallization:
+     * any number of client threads can call processBatch() simultaneously.
+     * this is safe because the locks are inside query, addEdge, and deleteEdge.
+     * this allows for:
+     *     1. only one write at a time.
+     *     2. concurrent reads when no write is happening.
+     *     3. each client operations are processed in order. 
+     * 
+     * 
+     * @param operations the operations to process
+     * @return an array of integers representing the results of the query operations
+     */
+
     @Override
-    public Integer[] processBatch(Operation[] operations) {
+    public Integer[] processBatch(Operation[] operations) throws RemoteException {
+        if (!this.precomputed) this.computeAllPaths();
+
         List<Integer> result = new ArrayList<>(operations.length);
+
         for (Operation op : operations) {
             switch (op.operationType()) {
                 case 'Q':
@@ -99,7 +142,6 @@ public class GraphEngine implements GraphService {
                 default:
                     break;
             }
-            // System.out.println(op.toString() + " " + this.adj.toString());
         }
         return result.toArray(new Integer[0]);
     }
@@ -114,7 +156,7 @@ public class GraphEngine implements GraphService {
      */
     private Integer[] BreadthFirstSearch(int u, int v) {
         if (u == v ) return new Integer[]{u};
-        if (!adj.containsKey(u)) return null;
+        if (!adj.containsKey(u) || !adj.containsKey(v)) return null;
         Set<Integer> visited = new HashSet<>();
         Queue<Integer> queue = new LinkedList<>();
         Map<Integer, Integer> parent = new HashMap<>();
@@ -156,9 +198,16 @@ public class GraphEngine implements GraphService {
     /**
      * Computes the shortest path between all pairs of nodes in the graph, and stores the results in the precomputedPaths private map.
      */
-    public void computeAllPaths() {
-        for (Integer u: this.adj.keySet()) {
-            for (Integer v: this.adj.keySet()) {
+    private void computeAllPaths() {
+        this.precomputedPaths.clear();
+
+        Set<Integer> allNodes = new HashSet<>(adj.keySet());
+        for (Set<Integer> neighbors : adj.values()) {
+            allNodes.addAll(neighbors);
+        }
+
+        for (Integer u: allNodes) {
+            for (Integer v: allNodes) {
                 Integer[] path = this.BreadthFirstSearch(u, v);
                 if (path != null) {
                     this.precomputedPaths.put(new GraphService.Pair(u, v), path.length - 1);
@@ -178,15 +227,16 @@ public class GraphEngine implements GraphService {
      * S --> to end the graph
      * and values are space separated, and are integers
      * @param filename
-     * @return
+     * @return true if the graph was successfully loaded, false otherwise
      */
-    public static GraphEngine loadFromFile(String filename) {
+    private boolean loadFromFile(String filename) {
         Map<Integer, Set<Integer>> tempAdj = new HashMap<>();
         try (BufferedReader bf = new BufferedReader(new FileReader(new File(filename)))) {
             String line;
             while ((line  = bf.readLine()) != null) {
-                if (line.contains("S")) {
-                    return new GraphEngine(tempAdj);
+                if (line.trim().equals("S")) {
+                    this.adj = tempAdj;
+                    return true;
                 }
                 String[] tokens = line.trim().split("\\s+");
                 int u = Integer.parseInt(tokens[0]);
@@ -198,7 +248,7 @@ public class GraphEngine implements GraphService {
         } catch (IOException  e) {
             e.printStackTrace();
         }
-        return null;
+        return false;
     }    
 
     @Override
