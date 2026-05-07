@@ -17,6 +17,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Queue;
 import java.util.Set;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import shared.GraphService;
 
@@ -27,20 +28,26 @@ public class GraphEngine implements GraphService {
     private final ReentrantReadWriteLock lock;
     private final PrintWriter logger;
     private final boolean verbose;
+    private boolean precomputeMode; // true = ASPPS, false = BFS
+    private boolean graphChanged;
+    private String filename;
+    private int simulatedDelayMs;
 
     public GraphEngine() {
         this(null, null, false);
     }
 
     public GraphEngine(String filename, String logfilePath, boolean verbose) {
-        // this(new HashMap<>(), logfilePath, verbose);
+        this.filename = filename;
         this.adj = new HashMap<>();
         this.precomputedPaths = new HashMap<>();
         this.precomputed = false;
         this.lock = new ReentrantReadWriteLock(true);
         this.verbose = verbose;
+        this.precomputeMode = false;
+        this.graphChanged = false;
         PrintWriter tempLogger = null;
-
+        this.simulatedDelayMs = 0;
 
         if (logfilePath != null) {
             try {
@@ -51,12 +58,6 @@ public class GraphEngine implements GraphService {
         }
 
         this.logger = tempLogger;
-
-        if (this.loadFromFile(filename)) {
-            this.computeAllPaths();
-        } else {
-            System.out.println("Failed to load graph from file");
-        }
     }
 
     /**
@@ -70,23 +71,27 @@ public class GraphEngine implements GraphService {
      */
     @Override
     public int query(int u, int v) throws RemoteException {
-        // TODO: implement lazy precomputation where we check if the path exists in the
-        // precomputed map, if not compute and add it.
         long startTime = System.currentTimeMillis();
         this.lock.readLock().lock(); // acquire read lock
         try {
-            if (!precomputed) {
+            if (precomputeMode) {
+                if (graphChanged) {
+                    computeAllPaths();
+                    graphChanged = false;
+                }
+                return this.precomputedPaths.getOrDefault(new GraphService.Pair(u, v), -1);
+            } else {
                 Integer[] path = this.BFS(u, v);
                 if (path == null)
                     return -1;
                 return path.length - 1;
-            } else {
-                return this.precomputedPaths.getOrDefault(new GraphService.Pair(u, v), -1);
             }
-
         } finally {
+            long duration = System.currentTimeMillis() - startTime;
+
             this.lock.readLock().unlock(); // release read lock
-            log("Q", u, v, startTime, System.currentTimeMillis() - startTime);
+            simulateDelay();
+            log("Q", u, v, startTime, duration);
         }
     }
 
@@ -105,9 +110,14 @@ public class GraphEngine implements GraphService {
             adj.putIfAbsent(u, new HashSet<>());
             adj.putIfAbsent(v, new HashSet<>());
             adj.get(u).add(v);
+            if (this.precomputeMode)
+                this.graphChanged = true;
         } finally {
+            long duration = System.currentTimeMillis() - startTime;
+
             this.lock.writeLock().unlock();
-            log("A", u, v, startTime, System.currentTimeMillis() - startTime);
+            simulateDelay();
+            log("A", u, v, startTime, duration);
         }
     }
 
@@ -126,9 +136,14 @@ public class GraphEngine implements GraphService {
             if (!adj.containsKey(u))
                 return;
             adj.get(u).remove(v);
+            if (this.precomputeMode)
+                this.graphChanged = true;
         } finally {
+            long duration = System.currentTimeMillis() - startTime;
+
             this.lock.writeLock().unlock();
-            log("D", u, v, startTime, System.currentTimeMillis() - startTime);
+            simulateDelay();
+            log("D", u, v, startTime, duration);
         }
 
     }
@@ -151,8 +166,10 @@ public class GraphEngine implements GraphService {
      */
     @Override
     public Integer[] processBatch(Operation[] operations) throws RemoteException {
-        if (!this.precomputed)
-            this.computeAllPaths();
+        if (precomputeMode && graphChanged) {
+            computeAllPaths();
+            this.graphChanged = false;
+        }
 
         List<Integer> result = new ArrayList<>(operations.length);
 
@@ -171,6 +188,7 @@ public class GraphEngine implements GraphService {
                     break;
             }
         }
+
         return result.toArray(new Integer[0]);
     }
 
@@ -306,24 +324,30 @@ public class GraphEngine implements GraphService {
      * @param filename
      * @return true if the graph was successfully loaded, false otherwise
      */
-    public boolean loadFromFile(String filename) {
+    public boolean loadFromFile(String filename) throws IllegalArgumentException {
         Map<Integer, Set<Integer>> tempAdj = new HashMap<>();
         try (BufferedReader bf = new BufferedReader(new FileReader(new File(filename)))) {
             String line;
             while ((line = bf.readLine()) != null) {
+                if (line == null || line.trim().equals("")) {
+                    throw new IllegalArgumentException("Empty line in graph file or does not end with 'S'");
+                }
+
                 if (line.trim().equals("S")) {
                     this.adj = tempAdj;
                     return true;
                 }
+
                 String[] tokens = line.trim().split("\\s+");
                 int u = Integer.parseInt(tokens[0]);
                 int v = Integer.parseInt(tokens[1]);
                 tempAdj.putIfAbsent(u, new HashSet<>());
                 tempAdj.putIfAbsent(v, new HashSet<>());
                 tempAdj.get(u).add(v);
+
             }
-        } catch (IOException e) {
-            e.printStackTrace();
+        } catch (IOException | NullPointerException e) {
+            System.err.println("Failed to load graph: " + e.getMessage());
         }
         return false;
     }
@@ -350,6 +374,34 @@ public class GraphEngine implements GraphService {
         synchronized (this.logger) {
             logger.print(line);
             logger.flush();
+        }
+    }
+
+
+    public void setPrecomputedMode(boolean precomputed) {
+        this.precomputeMode = precomputed;
+        if (precomputed) {
+            loadFromFile(this.filename);
+            computeAllPaths();
+            graphChanged = false;
+        }
+    }
+
+    public boolean getPrecomputeMode() {
+        return this.precomputed;
+    }
+
+    public void setSimulatedDelayMs(int simulatedDelayMs) throws RemoteException {
+        this.simulatedDelayMs = simulatedDelayMs;
+    }
+
+    private void simulateDelay() {
+        if (this.simulatedDelayMs > 0) {
+            try {
+                Thread.sleep(ThreadLocalRandom.current().nextInt(this.simulatedDelayMs + 1));
+            } catch (InterruptedException e) {
+                System.err.println("Failed to simulate sleep: " + e.getMessage());
+            }
         }
     }
 

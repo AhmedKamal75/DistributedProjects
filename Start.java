@@ -65,11 +65,13 @@ public class Start {
             final String batchFile = batchFiles[i];
             final String outputFile = properties.getProperty("GSP.data.directory") + "output" + i + ".txt";
             final String logFile = properties.getProperty("GSP.client.log.directory") + "client" + i + ".log";
+            final int maxOpDelayMs = Integer.parseInt(properties.getProperty("GSP.client.maxOpDelayMs"));
+            final int maxInterRequestSleepMs = Integer.parseInt(properties.getProperty("GSP.client.maxInterRequestSleepMs"));
 
             Thread clientThread = new Thread(
                 () -> {
                     try {
-                        Client client = new Client(clientId, logFile, batchMode, verbose);
+                        Client client = new Client(clientId, logFile, batchMode, verbose, maxOpDelayMs, maxInterRequestSleepMs);
                         client.run(serverHost, rmiPort, serviceName, batchFile, outputFile);
                     } catch (Exception e) {
                         System.err.println("Failed to run client: " + e.getMessage());
@@ -117,12 +119,13 @@ public class Start {
         String serviceName = properties.getProperty("GSP.serviceName");
         String serverLogFile = properties.getProperty("GSP.server.log.file");
         boolean serverVerbose = Boolean.parseBoolean(properties.getProperty("GSP.server.verbose"));
+        boolean precomputeMode = Boolean.parseBoolean(properties.getProperty("GSP.precomputeMode"));
 
         Server server = new Server("server1", serverLogFile, serverVerbose);
 
         Thread serverThread = new Thread(() -> {
             try {
-                server.run(graphFile, serverHost, serverPort, rmiPort, serviceName);
+                server.run(graphFile, serverHost, serverPort, rmiPort, serviceName, precomputeMode);
             } catch (Exception e) {
                 System.err.println("Failed to start server thread: " + e.getMessage());
             }

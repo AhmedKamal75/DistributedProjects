@@ -10,6 +10,8 @@ import java.io.PrintWriter;
 import java.rmi.registry.LocateRegistry;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ThreadLocalRandom;
+
 import shared.GraphService;
 
 // javac *.java
@@ -21,17 +23,19 @@ public class Client {
     private boolean batchMode;
     private boolean verbose;
     private PrintWriter logger;
+    private int maxOpDelayMs;
+    private int maxInterRequestSleepMs;
 
     public Client() {
-        this("client", "../log/client-logs.txt", false, false);
+        this("client", "../log/client-logs.txt", false, false, 0, 0);
     }
 
     public Client(String clientName) {
         // this.clientName = clientName;
-        this(clientName, "../log/client-logs.txt", false, false);
+        this(clientName, "../log/client-logs.txt", false, false, 0, 0);
     }
 
-    public Client(String clientName, String logFilePath, boolean batchMode, boolean verbose) {
+    public Client(String clientName, String logFilePath, boolean batchMode, boolean verbose, int maxOpDelayMs, int maxInterRequestSleepMs) {
         this.clientName = clientName;
         this.batchMode = batchMode;
         this.verbose = verbose;
@@ -48,6 +52,9 @@ public class Client {
             this.logger = null;
             this.verbose = false;
         }
+
+        this.maxOpDelayMs = maxOpDelayMs;
+        this.maxInterRequestSleepMs = maxInterRequestSleepMs;
     }
 
     /**
@@ -63,6 +70,7 @@ public class Client {
         try {
             GraphService stub = (GraphService) LocateRegistry.getRegistry(host, port).lookup(serviceName);
             List<GraphService.Operation> ops = this.loadOperations(opPath);
+            stub.setSimulatedDelayMs(this.maxOpDelayMs);
 
             if (ops == null || ops.isEmpty())
                 return;
@@ -87,6 +95,9 @@ public class Client {
                     if (op.operationType() == 'Q')
                         results.add(res);
                     this.log(op, startTime, System.currentTimeMillis(), null);
+                    if (this.maxInterRequestSleepMs > 0) {
+                        Thread.sleep(ThreadLocalRandom.current().nextInt(this.maxInterRequestSleepMs + 1));
+                    }
                 }
             }
 
@@ -134,8 +145,8 @@ public class Client {
             return ops;
         } catch (IOException e) {
             System.err.println("Load operations failed: " + e.getMessage());
-            return null;
         }
+        return ops;
     }
 
     private void exportResults(String path, List<Integer> results) {
@@ -163,8 +174,30 @@ public class Client {
     }
 
     public static void main(String[] args) {
-        Client client = new Client("Client", "../log/client_logs.csv", true, true);
-        client.run("localhost", 8080, "GraphEngine", "../data/patch_queries.txt", "../data/output.txt");
+        if (args.length < 6) {
+            System.err.println(
+                    "Usage: Client <clientName> <serverHost> <rmiPort> <serviceName> <opsFile> <outFile> [batchMode] [verbose] [logFilePath]");
+            System.exit(1);
+        }
+
+        String clientName = args[0];
+        String host = args[1];
+        int port = Integer.parseInt(args[2]);
+        String serviceName = args[3];
+        String opsFile = args[4];
+        String outFile = args[5];
+        boolean batchMode = args.length > 6 ? Boolean.parseBoolean(args[6]) : true;
+        boolean verbose = args.length > 7 ? Boolean.parseBoolean(args[7]) : true;
+        String logFile = args.length > 8 ? args[8] : null;
+
+        Client client = new Client(clientName, logFile, batchMode, verbose, 0, 0);
+        client.run(host, port, serviceName, opsFile, outFile);
     }
+
+    // public static void main(String[] args) {
+    //     Client client = new Client("Client", "../log/client_logs.csv", true, true, 0, 0);
+    //     client.run("localhost", 8080, "GraphEngine", "../data/patch_queries.txt",
+    //     "../data/output.txt");
+    // }
 
 }

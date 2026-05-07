@@ -18,4 +18,5 @@ public interface GraphService extends Remote {
 
     Integer[] processBatch(Operation[] operations) throws RemoteException; // returns only Q answers in order
 
+    public void setSimulatedDelayMs(int simulatedDelayMs) throws RemoteException;
 }

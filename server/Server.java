@@ -58,13 +58,15 @@ public class Server {
      * @param port        the port on which the server is running
      * @param rmiPort     the port on which the rmiregistry is running
      * @param serviceName the name of the stub on the rmiregistry
+     * @param precomputeMode true if precompute mode is enabled (asap), false otherwise (ondemand)
      */
-    public void run(String graphFile, String hostname, int port, int rmiPort, String serviceName) {
+    public void run(String graphFile, String hostname, int port, int rmiPort, String serviceName, boolean precomputeMode) {
         try {
             // the server on which the stup is running
             System.setProperty("java.rmi.server.hostname", hostname);
 
             this.engine = new GraphEngine(graphFile, this.logFilePath, this.verbose);
+            this.engine.setPrecomputedMode(precomputeMode);
 
             // this server stup is registered with rmiregistry on port serverPort.
             GraphService stub = (GraphService) UnicastRemoteObject.exportObject(this.engine, port);
@@ -108,29 +110,7 @@ public class Server {
 
 
     public static void main(String[] args) {
-        if (args.length < 6) {
-            System.err.println(
-                "Usage: Client <clientName> <serverHost> <rmiPort> <serviceName> <opsFile> <outFile> [batchMode] [verbose] [logFilePath]");
-            System.exit(1);
-        }
-        
-        String clientName = args[0];
-        String host = args[1];
-        int port = Integer.parseInt(args[2]);
-        String serviceName = args[3];
-        String opsFile = args[4];
-        String outFile = args[5];
-        boolean batchMode = args.length > 6 ? Boolean.parseBoolean(args[6]) : true;
-        boolean verbose = args.length > 7 ? Boolean.parseBoolean(args[7]) : true;
-        String logFile = args.length > 8 ? args[8] : null;
-
-        Client client = new Client(clientName, logFile, batchMode, verbose);
-        client.run(host, port, serviceName, opsFile, outFile);
+        Server server = new Server("server", "../log/server_logs.csv", true);
+        server.run("../data/intial_graph.txt", "localhost", 0, 8080, "GraphEngine", false);
     }
-
-    // public static void main(String[] args) {
-    //     Server server = new Server("server", "../log/server_logs.csv", true);
-    //     server.run("../data/intial_graph.txt", "localhost", 0, 8080, "GraphEngine");
-    // }
-
 }
