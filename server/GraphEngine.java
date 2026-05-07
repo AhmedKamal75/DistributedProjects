@@ -1,8 +1,14 @@
+package server;
+
 import java.io.BufferedReader;
+import java.io.BufferedWriter;
 import java.io.File;
 import java.io.FileReader;
+import java.io.FileWriter;
 import java.io.IOException;
+import java.io.PrintWriter;
 import java.rmi.RemoteException;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -12,20 +18,40 @@ import java.util.Map;
 import java.util.Queue;
 import java.util.Set;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
+import shared.GraphService;
 
 public class GraphEngine implements GraphService {
     private Map<Integer, Set<Integer>> adj;
     private Map<GraphService.Pair, Integer> precomputedPaths;
     private boolean precomputed;
     private final ReentrantReadWriteLock lock;
-    
-    
+    private final PrintWriter logger;
+    private final boolean verbose;
+
     public GraphEngine() {
-        this(new HashMap<>());
+        this(null, null, false);
     }
 
-    public GraphEngine(String filename) {
-        this(new HashMap<>());
+    public GraphEngine(String filename, String logfilePath, boolean verbose) {
+        // this(new HashMap<>(), logfilePath, verbose);
+        this.adj = new HashMap<>();
+        this.precomputedPaths = new HashMap<>();
+        this.precomputed = false;
+        this.lock = new ReentrantReadWriteLock(true);
+        this.verbose = verbose;
+        PrintWriter tempLogger = null;
+
+
+        if (logfilePath != null) {
+            try {
+                tempLogger = new PrintWriter(new BufferedWriter(new FileWriter(new File(logfilePath), true)));
+            } catch (IOException e) {
+                System.out.println("Failed to create log file: " + e);
+            }
+        }
+
+        this.logger = tempLogger;
+
         if (this.loadFromFile(filename)) {
             this.computeAllPaths();
         } else {
@@ -33,30 +59,26 @@ public class GraphEngine implements GraphService {
         }
     }
 
-
-    public GraphEngine(Map<Integer, Set<Integer>> adj) {
-        this.adj = adj;
-        this.precomputedPaths = new HashMap<>();
-        this.precomputed = false;
-        this.lock = new ReentrantReadWriteLock(true);
-    }
-
     /**
      * Queries the shortest distance between two nodes in the graph.
      * 
      * @param u the starting node
      * @param v the target node
-     * @return      the shortest distance between u and v,
-     *              or -1 if no path exists, or if u or v is not in the graph,
-     *              or 0 if u == v.
+     * @return the shortest distance between u and v,
+     *         or -1 if no path exists, or if u or v is not in the graph,
+     *         or 0 if u == v.
      */
     @Override
     public int query(int u, int v) throws RemoteException {
+        // TODO: implement lazy precomputation where we check if the path exists in the
+        // precomputed map, if not compute and add it.
+        long startTime = System.currentTimeMillis();
         this.lock.readLock().lock(); // acquire read lock
         try {
             if (!precomputed) {
-                Integer[] path = this.BreadthFirstSearch(u, v);
-                if (path == null) return -1;
+                Integer[] path = this.BFS(u, v);
+                if (path == null)
+                    return -1;
                 return path.length - 1;
             } else {
                 return this.precomputedPaths.getOrDefault(new GraphService.Pair(u, v), -1);
@@ -64,6 +86,7 @@ public class GraphEngine implements GraphService {
 
         } finally {
             this.lock.readLock().unlock(); // release read lock
+            log("Q", u, v, startTime, System.currentTimeMillis() - startTime);
         }
     }
 
@@ -72,9 +95,10 @@ public class GraphEngine implements GraphService {
      * 
      * @param u the starting node
      * @param v the target node
-    */
+     */
     @Override
     public void addEdge(int u, int v) throws RemoteException {
+        long startTime = System.currentTimeMillis();
         this.lock.writeLock().lock();
         try {
             this.precomputed = false;
@@ -83,6 +107,7 @@ public class GraphEngine implements GraphService {
             adj.get(u).add(v);
         } finally {
             this.lock.writeLock().unlock();
+            log("A", u, v, startTime, System.currentTimeMillis() - startTime);
         }
     }
 
@@ -94,37 +119,40 @@ public class GraphEngine implements GraphService {
      */
     @Override
     public void deleteEdge(int u, int v) throws RemoteException {
+        long startTime = System.currentTimeMillis();
         this.lock.writeLock().lock();
         try {
             this.precomputed = false;
-            if (!adj.containsKey(u)) return;
+            if (!adj.containsKey(u))
+                return;
             adj.get(u).remove(v);
         } finally {
             this.lock.writeLock().unlock();
+            log("D", u, v, startTime, System.currentTimeMillis() - startTime);
         }
 
     }
 
-
     /**
      * Processes a batch of operations and returns the results.
      * 
-     * parallization:
-     * any number of client threads can call processBatch() simultaneously.
-     * this is safe because the locks are inside query, addEdge, and deleteEdge.
-     * this allows for:
-     *     1. only one write at a time.
-     *     2. concurrent reads when no write is happening.
-     *     3. each client operations are processed in order. 
-     * 
+     * <p>
+     * Thread-safe: Multiple client threads can call this method simultaneously.
+     * Lock granularity within individual operations (query, addEdge, deleteEdge)
+     * ensures:
+     * <ul>
+     * <li>Only one write operation at a time</li>
+     * <li>Concurrent reads when no write is in progress</li>
+     * <li>In-order processing of each client's operations</li>
+     * </ul>
      * 
      * @param operations the operations to process
-     * @return an array of integers representing the results of the query operations
+     * @return an array of integers representing the results of query operations
      */
-
     @Override
     public Integer[] processBatch(Operation[] operations) throws RemoteException {
-        if (!this.precomputed) this.computeAllPaths();
+        if (!this.precomputed)
+            this.computeAllPaths();
 
         List<Integer> result = new ArrayList<>(operations.length);
 
@@ -145,18 +173,27 @@ public class GraphEngine implements GraphService {
         }
         return result.toArray(new Integer[0]);
     }
-    
+
     /**
-     * Performs a breadth-first search (BFS) to find the shortest path from node u to node v in the graph.
-     * ( On‑demand BFS )
+     * Performs a breadth-first search (BFS) to find the shortest path from node u
+     * to node v in the graph.
+     * ( On‑demand BFS)
+     * 
+     * BFS was choosen for point-to-point queries because it is a simple and
+     * efficient algorithm O(V+E)that can be
+     * implemented without the need to build a reverse adjacency list (as in
+     * Bidirectional).
      * 
      * @param u the starting node
      * @param v the target node
-     * @return an array of integers representing the shortest path from u to v, or null if no path exists
+     * @return an array of integers representing the shortest path from u to v, or
+     *         null if no path exists
      */
-    private Integer[] BreadthFirstSearch(int u, int v) {
-        if (u == v ) return new Integer[]{u};
-        if (!adj.containsKey(u) || !adj.containsKey(v)) return null;
+    private Integer[] BFS(int u, int v) {
+        if (u == v)
+            return new Integer[] { u };
+        if (!adj.containsKey(u) || !adj.containsKey(v))
+            return null;
         Set<Integer> visited = new HashSet<>();
         Queue<Integer> queue = new LinkedList<>();
         Map<Integer, Integer> parent = new HashMap<>();
@@ -166,12 +203,12 @@ public class GraphEngine implements GraphService {
 
         while (!queue.isEmpty()) {
             int curr = queue.poll();
-            
+
             if (curr == v) {
                 return reconstructPath(parent, u, v);
             }
 
-            for (Integer neighbor:this.adj.getOrDefault(curr, new HashSet<>())) {
+            for (Integer neighbor : this.adj.getOrDefault(curr, new HashSet<>())) {
                 if (!visited.contains(neighbor)) {
                     visited.add(neighbor);
                     queue.add(neighbor);
@@ -188,7 +225,8 @@ public class GraphEngine implements GraphService {
 
         while (curr != null) {
             path.addFirst(curr);
-            if (curr == u) break;
+            if (curr == u)
+                break;
             curr = parent.get(curr);
         }
 
@@ -196,7 +234,43 @@ public class GraphEngine implements GraphService {
     }
 
     /**
-     * Computes the shortest path between all pairs of nodes in the graph, and stores the results in the precomputedPaths private map.
+     * Runs BFS from node u on all nodes in the graph, and returns a map of the
+     * shortest distances from u to all nodes in the graph.
+     * 
+     * @param u        the starting node
+     * @param allNodes the set of all nodes in the graph
+     * @return a map of the shortest distances from u to all nodes in the graph
+     */
+    private Map<Integer, Integer> BFSAllPairs(int u, Set<Integer> allNodes) {
+        Map<Integer, Integer> distances = new HashMap<>();
+
+        distances.put(u, 0);
+
+        Set<Integer> visited = new HashSet<>();
+        Queue<Integer> queue = new LinkedList<>();
+
+        visited.add(u);
+        queue.add(u);
+
+        while (!queue.isEmpty()) {
+            int curr = queue.poll();
+            int currDistance = distances.get(curr);
+
+            for (Integer neighbor : this.adj.getOrDefault(curr, new HashSet<>())) {
+                if (!visited.contains(neighbor)) {
+                    visited.add(neighbor);
+                    distances.put(neighbor, currDistance + 1); // distace = parent distance + 1
+                    queue.add(neighbor);
+                }
+            }
+        }
+
+        return distances;
+    }
+
+    /**
+     * Computes the shortest path between all pairs of nodes in the graph, and
+     * stores the results in the precomputedPaths private map.
      */
     private void computeAllPaths() {
         this.precomputedPaths.clear();
@@ -206,14 +280,16 @@ public class GraphEngine implements GraphService {
             allNodes.addAll(neighbors);
         }
 
-        for (Integer u: allNodes) {
-            for (Integer v: allNodes) {
-                Integer[] path = this.BreadthFirstSearch(u, v);
-                if (path != null) {
-                    this.precomputedPaths.put(new GraphService.Pair(u, v), path.length - 1);
+        for (Integer u : allNodes) {
+            Map<Integer, Integer> distances = this.BFSAllPairs(u, allNodes);
+            for (Integer v : allNodes) {
+                Integer distance = distances.get(v);
+                if (distance != null) {
+                    this.precomputedPaths.put(new GraphService.Pair(u, v), distance);
                 }
             }
         }
+
         this.precomputed = true;
     }
 
@@ -226,14 +302,15 @@ public class GraphEngine implements GraphService {
      * ...
      * S --> to end the graph
      * and values are space separated, and are integers
+     * 
      * @param filename
      * @return true if the graph was successfully loaded, false otherwise
      */
-    private boolean loadFromFile(String filename) {
+    public boolean loadFromFile(String filename) {
         Map<Integer, Set<Integer>> tempAdj = new HashMap<>();
         try (BufferedReader bf = new BufferedReader(new FileReader(new File(filename)))) {
             String line;
-            while ((line  = bf.readLine()) != null) {
+            while ((line = bf.readLine()) != null) {
                 if (line.trim().equals("S")) {
                     this.adj = tempAdj;
                     return true;
@@ -245,11 +322,36 @@ public class GraphEngine implements GraphService {
                 tempAdj.putIfAbsent(v, new HashSet<>());
                 tempAdj.get(u).add(v);
             }
-        } catch (IOException  e) {
+        } catch (IOException e) {
             e.printStackTrace();
         }
         return false;
-    }    
+    }
+
+    /**
+     * Logs the execution time of a method call
+     * format:
+     * timestamp, thread id, method name, operation type, u, v, start time, duration
+     * 
+     * @param method    the method name ('Q', 'A', 'D')
+     * @param u         the source node
+     * @param v         the target node
+     * @param startTime the start time of the operation in milliseconds
+     * @param duration  the duration of the operation in milliseconds
+     */
+    private void log(String method, int u, int v, long startTime, long duration) {
+        if (!verbose || this.logger == null)
+            return;
+
+        String line = String.format("%d,%d,%s,%d,%d,%d,%d,%n",
+                Instant.now().toEpochMilli(),
+                Thread.currentThread().threadId(),
+                method, u, v, startTime, duration);
+        synchronized (this.logger) {
+            logger.print(line);
+            logger.flush();
+        }
+    }
 
     @Override
     public String toString() {
