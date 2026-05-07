@@ -6,17 +6,17 @@
  * 1. Loads configuration from system.properties
  * 2. Starts the RMI server
  * 3. Generates workload batches
- * 4. (TODO) Spawns client processes
+ * 4. Spawns client processes
  * 5. Cleanly shuts down the server
  */
 
 import java.io.FileInputStream;
+import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Properties;
 
-import client.Client;
 import server.Server;
 
 public class Start {
@@ -50,51 +50,71 @@ public class Start {
         }
     }
 
-    private static void executeClients(Properties properties, String[] batchFiles) {
+    private static void executeClients(Properties properties, String[] batchFiles)
+            throws IOException, InterruptedException {
+        String classpath = System.getProperty("java.class.path");
         String serverHost = properties.getProperty("GSP.server");
         int rmiPort = Integer.parseInt(properties.getProperty("GSP.rmiregistry.port"));
         String serviceName = properties.getProperty("GSP.serviceName");
-        int numberOfClients = Integer.parseInt(properties.getProperty("GSP.numberOfnodes"));
+        int numNodes = Integer.parseInt(properties.getProperty("GSP.numberOfnodes"));
         boolean batchMode = Boolean.parseBoolean(properties.getProperty("GSP.batchMode"));
         boolean verbose = Boolean.parseBoolean(properties.getProperty("GSP.client.verbose"));
-        
-        List<Thread> clientThreads = new ArrayList<>();
+        int clientSleepMs = Integer.parseInt(properties.getProperty("GSP.client.operations.sleep"));
 
-        for (int i = 0; i < numberOfClients; i++) {
-            final String clientId = "client" + i;
+        List<Process> processes = new ArrayList<>();
+
+        for (int i = 0; i < numNodes; i++) {
+            String nodeHost = properties.getProperty("GSP.node" + i);
             final String batchFile = batchFiles[i];
             final String outputFile = properties.getProperty("GSP.data.directory") + "output" + i + ".txt";
-            final String logFile = properties.getProperty("GSP.client.log.directory") + "client" + i + ".log";
-            final int maxOpDelayMs = Integer.parseInt(properties.getProperty("GSP.client.maxOpDelayMs"));
-            final int maxInterRequestSleepMs = Integer.parseInt(properties.getProperty("GSP.client.maxInterRequestSleepMs"));
+            final String logFile = properties.getProperty("GSP.client.log.directory") + "log" + i + ".log";
+            final String clientId = "client" + i;
 
-            Thread clientThread = new Thread(
-                () -> {
-                    try {
-                        Client client = new Client(clientId, logFile, batchMode, verbose, maxOpDelayMs, maxInterRequestSleepMs);
-                        client.run(serverHost, rmiPort, serviceName, batchFile, outputFile);
-                    } catch (Exception e) {
-                        System.err.println("Failed to run client: " + e.getMessage());
-                    }
-                }, "ClientThread-" + i
-            );
+            List<String> cmd = new ArrayList<>();
+            if (!nodeHost.equals("localhost") && !nodeHost.equals("127.0.0.1")) {
+                cmd.add("ssh");
+                cmd.add(nodeHost);
+                // Quote the whole remote command to protect spaces (simplistic but works for
+                // typical paths)
+                String remoteCmd = String.format(
+                        "cd \"%s\" && java -cp \"%s\" client.Client %s %d %s %s %s %b %b %s %d",
+                        System.getProperty("user.dir"), classpath,
+                        serverHost, rmiPort, serviceName,
+                        batchFile, outputFile, batchMode, verbose,
+                        logFile, clientSleepMs);
+                cmd.add(remoteCmd);
+            } else {
+                cmd.add("java");
+                cmd.add("-cp");
+                cmd.add(classpath);
+                cmd.add("client.Client");
+                cmd.add(serverHost);
+                cmd.add(String.valueOf(rmiPort));
+                cmd.add(serviceName);
+                cmd.add(batchFile);
+                cmd.add(outputFile);
+                cmd.add(String.valueOf(batchMode));
+                cmd.add(String.valueOf(verbose));
+                cmd.add(logFile);
+                cmd.add(String.valueOf(clientSleepMs));
+            }
 
-            clientThread.setDaemon(false); // Client should block until explicitly stopped
-            clientThreads.add(clientThread);
-            clientThread.start();
+            System.out.println("Executing client: " + String.join(" ", cmd));
+            Process p = new ProcessBuilder(cmd).inheritIO().start();
+            processes.add(p);
         }
 
-        for (Thread t:clientThreads) {
-            try {
-                t.join();
-            } catch (InterruptedException e) {
-                System.err.println("Failed to join client thread: " + e.getMessage());
+        int clientTimeoutSeconds = Integer.parseInt(properties.getProperty("GSP.client.timeout.seconds"));
+        for (Process p : processes) {
+            boolean finished = p.waitFor(clientTimeoutSeconds, java.util.concurrent.TimeUnit.SECONDS);
+            if (!finished) {
+                System.err.println("Client process " + p.pid() + " timed out, destroying it.");
+                p.destroyForcibly();
             }
         }
     }
 
-
-	/**
+    /**
      * Loads configuration from system.properties file
      */
     private static Properties loadConfiguration() throws Exception {
@@ -120,8 +140,9 @@ public class Start {
         String serverLogFile = properties.getProperty("GSP.server.log.file");
         boolean serverVerbose = Boolean.parseBoolean(properties.getProperty("GSP.server.verbose"));
         boolean precomputeMode = Boolean.parseBoolean(properties.getProperty("GSP.precomputeMode"));
+        int serverDelayMs = Integer.parseInt(properties.getProperty("GSP.server.operations.sleep"));
 
-        Server server = new Server("server1", serverLogFile, serverVerbose);
+        Server server = new Server("server1", serverLogFile, serverVerbose, serverDelayMs);
 
         Thread serverThread = new Thread(() -> {
             try {

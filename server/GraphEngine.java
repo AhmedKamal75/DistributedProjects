@@ -17,37 +17,39 @@ import java.util.List;
 import java.util.Map;
 import java.util.Queue;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import shared.GraphService;
 
 public class GraphEngine implements GraphService {
     private Map<Integer, Set<Integer>> adj;
-    private Map<GraphService.Pair, Integer> precomputedPaths;
+    private volatile Map<GraphService.Pair, Integer> precomputedPaths;
     private boolean precomputed;
     private final ReentrantReadWriteLock lock;
     private final PrintWriter logger;
     private final boolean verbose;
     private boolean precomputeMode; // true = ASPPS, false = BFS
-    private boolean graphChanged;
+    private volatile boolean graphChanged; // volatile is for thread safety that makes variable value visible to all
+                                           // threads
     private String filename;
     private int simulatedDelayMs;
 
     public GraphEngine() {
-        this(null, null, false);
+        this(null, null, false, 0);
     }
 
-    public GraphEngine(String filename, String logfilePath, boolean verbose) {
+    public GraphEngine(String filename, String logfilePath, boolean verbose, int simulatedDelayMs) {
         this.filename = filename;
         this.adj = new HashMap<>();
-        this.precomputedPaths = new HashMap<>();
+        this.precomputedPaths = new ConcurrentHashMap<>();// HashMap<>();
         this.precomputed = false;
         this.lock = new ReentrantReadWriteLock(true);
         this.verbose = verbose;
         this.precomputeMode = false;
         this.graphChanged = false;
         PrintWriter tempLogger = null;
-        this.simulatedDelayMs = 0;
+        this.simulatedDelayMs = simulatedDelayMs;
 
         if (logfilePath != null) {
             try {
@@ -74,11 +76,7 @@ public class GraphEngine implements GraphService {
         long startTime = System.currentTimeMillis();
         this.lock.readLock().lock(); // acquire read lock
         try {
-            if (precomputeMode) {
-                if (graphChanged) {
-                    computeAllPaths();
-                    graphChanged = false;
-                }
+            if (precomputeMode && !this.graphChanged) {
                 return this.precomputedPaths.getOrDefault(new GraphService.Pair(u, v), -1);
             } else {
                 Integer[] path = this.BFS(u, v);
@@ -166,9 +164,16 @@ public class GraphEngine implements GraphService {
      */
     @Override
     public Integer[] processBatch(Operation[] operations) throws RemoteException {
-        if (precomputeMode && graphChanged) {
-            computeAllPaths();
-            this.graphChanged = false;
+        if (this.precomputeMode) {
+            this.lock.writeLock().lock();
+            try {
+                if (this.graphChanged) {
+                    computeAllPaths();
+                    this.graphChanged = false;
+                }
+            } finally {
+                this.lock.writeLock().unlock();
+            }
         }
 
         List<Integer> result = new ArrayList<>(operations.length);
@@ -188,6 +193,8 @@ public class GraphEngine implements GraphService {
                     break;
             }
         }
+
+        this.logger.flush();
 
         return result.toArray(new Integer[0]);
     }
@@ -291,23 +298,25 @@ public class GraphEngine implements GraphService {
      * stores the results in the precomputedPaths private map.
      */
     private void computeAllPaths() {
-        this.precomputedPaths.clear();
 
         Set<Integer> allNodes = new HashSet<>(adj.keySet());
         for (Set<Integer> neighbors : adj.values()) {
             allNodes.addAll(neighbors);
         }
 
+        Map<GraphService.Pair, Integer> temp = new HashMap<>(allNodes.size() * allNodes.size());
+
         for (Integer u : allNodes) {
             Map<Integer, Integer> distances = this.BFSAllPairs(u, allNodes);
             for (Integer v : allNodes) {
                 Integer distance = distances.get(v);
                 if (distance != null) {
-                    this.precomputedPaths.put(new GraphService.Pair(u, v), distance);
+                    temp.put(new GraphService.Pair(u, v), distance);
                 }
             }
         }
 
+        this.precomputedPaths = temp;
         this.precomputed = true;
     }
 
@@ -371,12 +380,8 @@ public class GraphEngine implements GraphService {
                 Instant.now().toEpochMilli(),
                 Thread.currentThread().threadId(),
                 method, u, v, startTime, duration);
-        synchronized (this.logger) {
-            logger.print(line);
-            logger.flush();
-        }
+        logger.print(line);
     }
-
 
     public void setPrecomputedMode(boolean precomputed) {
         this.precomputeMode = precomputed;
@@ -389,10 +394,6 @@ public class GraphEngine implements GraphService {
 
     public boolean getPrecomputeMode() {
         return this.precomputed;
-    }
-
-    public void setSimulatedDelayMs(int simulatedDelayMs) throws RemoteException {
-        this.simulatedDelayMs = simulatedDelayMs;
     }
 
     private void simulateDelay() {

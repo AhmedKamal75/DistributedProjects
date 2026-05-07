@@ -6,7 +6,6 @@ import java.rmi.registry.LocateRegistry;
 import java.rmi.registry.Registry;
 import java.rmi.server.UnicastRemoteObject;
 
-import client.Client;
 import shared.GraphService;
 
 // rmiregistry 8080
@@ -18,14 +17,16 @@ public class Server {
     private String serverName;
     private String logFilePath;
     private boolean verbose;
+    private int simulatedDelayMs;
 
     public Server() {
-        this("server", null, true);
+        this("server", null, true, 0);
     }
 
-    public Server(String serverName, String logFilePath, boolean verbose) {
+    public Server(String serverName, String logFilePath, boolean verbose, int simulatedDelayMs) {
         this.serverName = serverName;
         this.verbose = verbose;
+        this.simulatedDelayMs = simulatedDelayMs;
 
         if (logFilePath == null) {
             this.logFilePath = "log/" + this.serverName + "_" + "logs.txt";
@@ -52,20 +53,22 @@ public class Server {
     /**
      * Runs the server
      * 
-     * @param graphFile   the file containing the graph
-     * @param hostname    the address of the server on which the stub (service
-     *                    provider) is running
-     * @param port        the port on which the server is running
-     * @param rmiPort     the port on which the rmiregistry is running
-     * @param serviceName the name of the stub on the rmiregistry
-     * @param precomputeMode true if precompute mode is enabled (asap), false otherwise (ondemand)
+     * @param graphFile      the file containing the graph
+     * @param hostname       the address of the server on which the stub (service
+     *                       provider) is running
+     * @param port           the port on which the server is running
+     * @param rmiPort        the port on which the rmiregistry is running
+     * @param serviceName    the name of the stub on the rmiregistry
+     * @param precomputeMode true if precompute mode is enabled (asap), false
+     *                       otherwise (ondemand)
      */
-    public void run(String graphFile, String hostname, int port, int rmiPort, String serviceName, boolean precomputeMode) {
+    public void run(String graphFile, String hostname, int port, int rmiPort, String serviceName,
+            boolean precomputeMode) {
         try {
             // the server on which the stup is running
             System.setProperty("java.rmi.server.hostname", hostname);
 
-            this.engine = new GraphEngine(graphFile, this.logFilePath, this.verbose);
+            this.engine = new GraphEngine(graphFile, this.logFilePath, this.verbose, this.simulatedDelayMs);
             this.engine.setPrecomputedMode(precomputeMode);
 
             // this server stup is registered with rmiregistry on port serverPort.
@@ -89,6 +92,10 @@ public class Server {
 
             System.out.print("R\n"); // as required
 
+            while (true) {
+                Thread.sleep(Long.MAX_VALUE);
+            }
+
         } catch (Exception e) {
             System.err.println("GraphEngine server [" + this.serverName + "] exception: " + e.getMessage());
             e.printStackTrace();
@@ -106,11 +113,5 @@ public class Server {
             System.err.println(
                     "GraphEngine server [" + this.serverName + "] exception during shutdown: " + e.getMessage());
         }
-    }
-
-
-    public static void main(String[] args) {
-        Server server = new Server("server", "../log/server_logs.csv", true);
-        server.run("../data/intial_graph.txt", "localhost", 0, 8080, "GraphEngine", false);
     }
 }

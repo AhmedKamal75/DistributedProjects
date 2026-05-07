@@ -7,6 +7,7 @@ import java.io.FileReader;
 import java.io.FileWriter;
 import java.io.IOException;
 import java.io.PrintWriter;
+import java.rmi.RemoteException;
 import java.rmi.registry.LocateRegistry;
 import java.util.ArrayList;
 import java.util.List;
@@ -18,30 +19,18 @@ import shared.GraphService;
 // java Client
 
 public class Client {
-    private String clientName;
     private String logFilePath;
     private boolean batchMode;
     private boolean verbose;
     private PrintWriter logger;
-    private int maxOpDelayMs;
-    private int maxInterRequestSleepMs;
+    private int maxSleep;
 
-    public Client() {
-        this("client", "../log/client-logs.txt", false, false, 0, 0);
-    }
-
-    public Client(String clientName) {
-        // this.clientName = clientName;
-        this(clientName, "../log/client-logs.txt", false, false, 0, 0);
-    }
-
-    public Client(String clientName, String logFilePath, boolean batchMode, boolean verbose, int maxOpDelayMs, int maxInterRequestSleepMs) {
-        this.clientName = clientName;
+    public Client(String logFilePath, boolean batchMode, boolean verbose, int maxSleep) {
         this.batchMode = batchMode;
         this.verbose = verbose;
 
         if (logFilePath == null) {
-            this.logFilePath = "log/" + this.clientName + "_" + "logs.txt";
+            System.err.println("Client logger initialization failed: logFilePath is null");
         } else {
             this.logFilePath = logFilePath;
         }
@@ -53,8 +42,7 @@ public class Client {
             this.verbose = false;
         }
 
-        this.maxOpDelayMs = maxOpDelayMs;
-        this.maxInterRequestSleepMs = maxInterRequestSleepMs;
+        this.maxSleep = maxSleep;
     }
 
     /**
@@ -70,7 +58,6 @@ public class Client {
         try {
             GraphService stub = (GraphService) LocateRegistry.getRegistry(host, port).lookup(serviceName);
             List<GraphService.Operation> ops = this.loadOperations(opPath);
-            stub.setSimulatedDelayMs(this.maxOpDelayMs);
 
             if (ops == null || ops.isEmpty())
                 return;
@@ -79,24 +66,35 @@ public class Client {
 
             if (this.batchMode) {
                 long startTime = System.currentTimeMillis();
-                Integer[] batchResults = stub.processBatch(ops.toArray(new GraphService.Operation[0]));
+                try {
+                    Integer[] batchResults = stub.processBatch(ops.toArray(new GraphService.Operation[0]));
+                    results.addAll(List.of(batchResults));
+                } catch (RemoteException e ) {
+                    System.err.println("Batch processing failed: " + e.getMessage());
+                    long queryCount = ops.stream().filter(op->op.operationType() == 'Q').count();
+                    for (int i = 0; i < queryCount; i++) results.add(-1);
+                }
+                
                 this.log(null, startTime, System.currentTimeMillis(), "Batch Size: " + ops.size());
-                results.addAll(List.of(batchResults));
             } else {
                 for (GraphService.Operation op : ops) {
                     long startTime = System.currentTimeMillis();
                     int res = -1;
-                    switch (op.operationType()) {
-                        case 'Q' -> res = stub.query(op.u(), op.v());
-                        case 'A' -> stub.addEdge(op.u(), op.v());
-                        case 'D' -> stub.deleteEdge(op.u(), op.v());
-                        default -> System.err.println("Invalid operation type: " + op.operationType());
+                    try {
+                        switch (op.operationType()) {
+                            case 'Q' -> res = stub.query(op.u(), op.v());
+                            case 'A' -> stub.addEdge(op.u(), op.v());
+                            case 'D' -> stub.deleteEdge(op.u(), op.v());
+                            default -> System.err.println("Invalid operation type: " + op.operationType());
+                        }
+                    } catch (RemoteException e) {
+                        System.err.println("Remote call failed for operation: " + op.operationType() + " " + op.u() + " " + op.v() + ":" + e.getMessage());
                     }
                     if (op.operationType() == 'Q')
                         results.add(res);
                     this.log(op, startTime, System.currentTimeMillis(), null);
-                    if (this.maxInterRequestSleepMs > 0) {
-                        Thread.sleep(ThreadLocalRandom.current().nextInt(this.maxInterRequestSleepMs + 1));
+                    if (this.maxSleep > 0) {
+                        Thread.sleep(ThreadLocalRandom.current().nextInt(this.maxSleep + 1));
                     }
                 }
             }
@@ -176,11 +174,10 @@ public class Client {
     public static void main(String[] args) {
         if (args.length < 6) {
             System.err.println(
-                    "Usage: Client <clientName> <serverHost> <rmiPort> <serviceName> <opsFile> <outFile> [batchMode] [verbose] [logFilePath]");
+                    "Usage: Client <serverHost> <rmiPort> <serviceName> <opsFile> <outFile> [batchMode] [verbose] [logFilePath] [maxSleep]");
             System.exit(1);
         }
 
-        String clientName = args[0];
         String host = args[1];
         int port = Integer.parseInt(args[2]);
         String serviceName = args[3];
@@ -189,15 +186,9 @@ public class Client {
         boolean batchMode = args.length > 6 ? Boolean.parseBoolean(args[6]) : true;
         boolean verbose = args.length > 7 ? Boolean.parseBoolean(args[7]) : true;
         String logFile = args.length > 8 ? args[8] : null;
+        int maxSleep = args.length > 9 ? Integer.parseInt(args[9]) : 0;
 
-        Client client = new Client(clientName, logFile, batchMode, verbose, 0, 0);
+        Client client = new Client(logFile, batchMode, verbose, maxSleep);
         client.run(host, port, serviceName, opsFile, outFile);
     }
-
-    // public static void main(String[] args) {
-    //     Client client = new Client("Client", "../log/client_logs.csv", true, true, 0, 0);
-    //     client.run("localhost", 8080, "GraphEngine", "../data/patch_queries.txt",
-    //     "../data/output.txt");
-    // }
-
 }
