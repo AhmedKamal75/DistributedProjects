@@ -15,7 +15,7 @@ public class CorrectnessHarness {
         }
         boolean precompute = args.length > 0 && args[0].equalsIgnoreCase("all");
 
-        GraphEngine engine = new GraphEngine(null, "log/server_logs.csv", true, 10);
+        GraphEngine engine = new GraphEngine(null, "log/correctness_logs.csv", true, 10);
         engine.setPrecomputedMode(precompute);
 
         BufferedReader in = new BufferedReader(new InputStreamReader(System.in));
@@ -34,6 +34,22 @@ public class CorrectnessHarness {
 
         List<GraphService.Operation> batch = new ArrayList<>();
         while ((line = in.readLine()) != null) {
+            if (line == null || line.trim().equals("")) continue;
+            if (line.trim().equalsIgnoreCase("quit") || line.trim().equalsIgnoreCase("exit")) {
+                System.exit(0);
+            }
+            if (line.trim().equalsIgnoreCase("print-adj")) {
+                System.out.println(engine.toString());
+                continue;
+            }
+            if (line.trim().equalsIgnoreCase("flush")) {
+                Integer[] results = engine.processBatch(
+                        batch.toArray(new GraphService.Operation[0]));
+                for (Integer result : results)
+                    System.out.println(result);
+                batch.clear();
+                continue;
+            }
             if (line.trim().equals("F")) {
                 Integer[] results = engine.processBatch(
                         batch.toArray(new GraphService.Operation[0]));

@@ -221,12 +221,12 @@ The scripts `correctness.sh` and `start.sh` clean the `classes/` directory befor
 ## Logging & Performance Data
 
 ### Server Log
-Location: `log/server_logs.csv`.  
+Location: `log/server-log.txt`.  
 Format: `timestamp, threadId, operationType, u, v, startTime, duration` (CSV).  
 Every remote call (even those inside a batch) is logged. A final flush happens after each batch.
 
 ### Client Logs
-Location: `log/log0.log`, `log/log1.log`, …  
+Location: `log/log0.txt`, `log/log1.txt`, …  
 Format (batch mode): `BATCH_MODE,-,-,startTime,endTime,duration,Batch Size: N`  
 Format (one‑by‑one): `operationType,u,v,startTime,endTime,duration`
 
@@ -302,7 +302,7 @@ For each configuration, run multiple trials and compute the **average or median 
 │   └── output*.txt
 ├── log/
 │   ├── server_logs.csv
-│   └── log*.log
+│   └── log*.txt
 └── classes/                  (compiled .class files)
 ```
 

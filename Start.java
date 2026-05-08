@@ -67,7 +67,7 @@ public class Start {
             String nodeHost = properties.getProperty("GSP.node" + i);
             final String batchFile = batchFiles[i];
             final String outputFile = properties.getProperty("GSP.data.directory") + "output" + i + ".txt";
-            final String logFile = properties.getProperty("GSP.client.log.directory") + "log" + i + ".log";
+            final String logFile = properties.getProperty("GSP.client.log.directory") + "log" + i + ".txt";
 
             List<String> cmd = new ArrayList<>();
             if (!nodeHost.equals("localhost") && !nodeHost.equals("127.0.0.1")) {

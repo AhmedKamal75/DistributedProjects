@@ -65,20 +65,23 @@ public class Client {
             List<Integer> results = new ArrayList<>();
 
             if (this.batchMode) {
-                long startTime = System.currentTimeMillis();
+                final long startNano = System.nanoTime();
                 try {
                     Integer[] batchResults = stub.processBatch(ops.toArray(new GraphService.Operation[0]));
                     results.addAll(List.of(batchResults));
-                } catch (RemoteException e ) {
+                } catch (RemoteException e) {
                     System.err.println("Batch processing failed: " + e.getMessage());
-                    long queryCount = ops.stream().filter(op->op.operationType() == 'Q').count();
-                    for (int i = 0; i < queryCount; i++) results.add(-1);
+                    long queryCount = ops.stream().filter(op -> op.operationType() == 'Q').count();
+                    for (int i = 0; i < queryCount; i++)
+                        results.add(-1);
                 }
-                
-                this.log(null, startTime, System.currentTimeMillis(), "Batch Size: " + ops.size());
+
+                long endNano = System.nanoTime();
+                long duration = endNano - startNano;
+                this.log(null, startNano, endNano, duration, "Batch Size: " + ops.size());
             } else {
                 for (GraphService.Operation op : ops) {
-                    long startTime = System.currentTimeMillis();
+                    final long startNano = System.nanoTime();
                     int res = -1;
                     try {
                         switch (op.operationType()) {
@@ -88,11 +91,14 @@ public class Client {
                             default -> System.err.println("Invalid operation type: " + op.operationType());
                         }
                     } catch (RemoteException e) {
-                        System.err.println("Remote call failed for operation: " + op.operationType() + " " + op.u() + " " + op.v() + ":" + e.getMessage());
+                        System.err.println("Remote call failed for operation: " + op.operationType() + " " + op.u()
+                                + " " + op.v() + ":" + e.getMessage());
                     }
                     if (op.operationType() == 'Q')
                         results.add(res);
-                    this.log(op, startTime, System.currentTimeMillis(), null);
+                    long endNano = System.nanoTime();
+                    long duration = endNano - startNano;
+                    this.log(op, startNano, endNano, duration, null);
                     if (this.maxSleep > 0) {
                         Thread.sleep(ThreadLocalRandom.current().nextInt(this.maxSleep + 1));
                     }
@@ -160,7 +166,7 @@ public class Client {
         }
     }
 
-    public void log(GraphService.Operation op, long startTime, long endTime, String message) {
+    public void log(GraphService.Operation op, long startTime, long endTime, long duration, String message) {
         if (!verbose || logger == null)
             return;
 
@@ -168,25 +174,25 @@ public class Client {
         String u = (op != null) ? String.valueOf(op.u()) : "-";
         String v = (op != null) ? String.valueOf(op.v()) : "-";
         logger.printf("%s,%s,%s,%d,%d,%d%s%n",
-                type, u, v, startTime, endTime, (endTime - startTime), (message != null) ? "," + message : "");
+                type, u, v, startTime, endTime, duration, (message != null) ? "," + message : "");
     }
 
     public static void main(String[] args) {
-        if (args.length < 6) {
+        if (args.length < 5) {
             System.err.println(
                     "Usage: Client <serverHost> <rmiPort> <serviceName> <opsFile> <outFile> [batchMode] [verbose] [logFilePath] [maxSleep]");
             System.exit(1);
         }
 
-        String host = args[1];
-        int port = Integer.parseInt(args[2]);
-        String serviceName = args[3];
-        String opsFile = args[4];
-        String outFile = args[5];
-        boolean batchMode = args.length > 6 ? Boolean.parseBoolean(args[6]) : true;
-        boolean verbose = args.length > 7 ? Boolean.parseBoolean(args[7]) : true;
-        String logFile = args.length > 8 ? args[8] : null;
-        int maxSleep = args.length > 9 ? Integer.parseInt(args[9]) : 0;
+        String host = args[0];
+        int port = Integer.parseInt(args[1]);
+        String serviceName = args[2];
+        String opsFile = args[3];
+        String outFile = args[4];
+        boolean batchMode = args.length > 5 ? Boolean.parseBoolean(args[5]) : true;
+        boolean verbose = args.length > 6 ? Boolean.parseBoolean(args[6]) : true;
+        String logFile = args.length > 7 ? args[7] : null;
+        int maxSleep = args.length > 8 ? Integer.parseInt(args[8]) : 0;
 
         Client client = new Client(logFile, batchMode, verbose, maxSleep);
         client.run(host, port, serviceName, opsFile, outFile);

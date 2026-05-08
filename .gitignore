@@ -1,0 +1,7 @@
+// ignore experiments directory and its context as well as logs and classes and .vscode and .git
+experiments/
+logs/
+classes/
+*.class
+.vscode/
+.git/

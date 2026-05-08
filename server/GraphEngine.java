@@ -8,7 +8,6 @@ import java.io.FileWriter;
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.rmi.RemoteException;
-import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -71,7 +70,8 @@ public class GraphEngine implements GraphService {
      */
     @Override
     public int query(int u, int v) throws RemoteException {
-        long startTime = System.currentTimeMillis();
+        long startTime = System.nanoTime();
+        final long startNano = System.nanoTime();
         this.lock.readLock().lock(); // acquire read lock
         try {
             if (precomputeMode && !this.graphChanged) {
@@ -83,7 +83,7 @@ public class GraphEngine implements GraphService {
                 return path.length - 1;
             }
         } finally {
-            long duration = System.currentTimeMillis() - startTime;
+            long duration = System.nanoTime() - startNano;
 
             this.lock.readLock().unlock(); // release read lock
             simulateDelay();
@@ -99,7 +99,7 @@ public class GraphEngine implements GraphService {
      */
     @Override
     public void addEdge(int u, int v) throws RemoteException {
-        long startTime = System.currentTimeMillis();
+        final long startNano = System.nanoTime();
         this.lock.writeLock().lock();
         try {
             adj.putIfAbsent(u, new HashSet<>());
@@ -108,11 +108,11 @@ public class GraphEngine implements GraphService {
             if (this.precomputeMode)
                 this.graphChanged = true;
         } finally {
-            long duration = System.currentTimeMillis() - startTime;
+            long duration = System.nanoTime() - startNano;
 
             this.lock.writeLock().unlock();
             simulateDelay();
-            log("A", u, v, startTime, duration);
+            log("A", u, v, startNano, duration);
         }
     }
 
@@ -124,7 +124,7 @@ public class GraphEngine implements GraphService {
      */
     @Override
     public void deleteEdge(int u, int v) throws RemoteException {
-        long startTime = System.currentTimeMillis();
+        final long startNano = System.nanoTime();
         this.lock.writeLock().lock();
         try {
             if (!adj.containsKey(u))
@@ -133,11 +133,11 @@ public class GraphEngine implements GraphService {
             if (this.precomputeMode)
                 this.graphChanged = true;
         } finally {
-            long duration = System.currentTimeMillis() - startTime;
+            long duration = System.nanoTime() - startNano;
 
             this.lock.writeLock().unlock();
             simulateDelay();
-            log("D", u, v, startTime, duration);
+            log("D", u, v, startNano, duration);
         }
 
     }
@@ -368,15 +368,15 @@ public class GraphEngine implements GraphService {
      * @param method    the method name ('Q', 'A', 'D')
      * @param u         the source node
      * @param v         the target node
-     * @param startTime the start time of the operation in milliseconds
-     * @param duration  the duration of the operation in milliseconds
+     * @param startTime the start time of the operation in nanoseconds
+     * @param duration  the duration of the operation in nanoseconds
      */
     private void log(String method, int u, int v, long startTime, long duration) {
         if (!verbose || this.logger == null)
             return;
 
         String line = String.format("%d,%d,%s,%d,%d,%d,%d,%n",
-                Instant.now().toEpochMilli(),
+                System.nanoTime(),
                 Thread.currentThread().threadId(),
                 method, u, v, startTime, duration);
         logger.print(line);
@@ -384,6 +384,9 @@ public class GraphEngine implements GraphService {
 
     public void setPrecomputedMode(boolean on) {
         this.precomputeMode = on;
+        if (this.filename != null && this.adj.isEmpty()){
+            loadFromFile(this.filename);
+        }
         if (on) {
             loadFromFile(this.filename);
             computeAllPaths();
