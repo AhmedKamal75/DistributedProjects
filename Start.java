@@ -68,7 +68,6 @@ public class Start {
             final String batchFile = batchFiles[i];
             final String outputFile = properties.getProperty("GSP.data.directory") + "output" + i + ".txt";
             final String logFile = properties.getProperty("GSP.client.log.directory") + "log" + i + ".log";
-            final String clientId = "client" + i;
 
             List<String> cmd = new ArrayList<>();
             if (!nodeHost.equals("localhost") && !nodeHost.equals("127.0.0.1")) {
@@ -137,7 +136,7 @@ public class Start {
         int rmiPort = Integer.parseInt(properties.getProperty("GSP.rmiregistry.port"));
         String graphFile = properties.getProperty("GSP.graph.file");
         String serviceName = properties.getProperty("GSP.serviceName");
-        String serverLogFile = properties.getProperty("GSP.server.log.file");
+        String serverLogFile = properties.getProperty("GSP.server.log.directory") + "server-log.txt";
         boolean serverVerbose = Boolean.parseBoolean(properties.getProperty("GSP.server.verbose"));
         boolean precomputeMode = Boolean.parseBoolean(properties.getProperty("GSP.precomputeMode"));
         int serverDelayMs = Integer.parseInt(properties.getProperty("GSP.server.operations.sleep"));

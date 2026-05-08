@@ -25,7 +25,6 @@ import shared.GraphService;
 public class GraphEngine implements GraphService {
     private Map<Integer, Set<Integer>> adj;
     private volatile Map<GraphService.Pair, Integer> precomputedPaths;
-    private boolean precomputed;
     private final ReentrantReadWriteLock lock;
     private final PrintWriter logger;
     private final boolean verbose;
@@ -43,7 +42,6 @@ public class GraphEngine implements GraphService {
         this.filename = filename;
         this.adj = new HashMap<>();
         this.precomputedPaths = new ConcurrentHashMap<>();// HashMap<>();
-        this.precomputed = false;
         this.lock = new ReentrantReadWriteLock(true);
         this.verbose = verbose;
         this.precomputeMode = false;
@@ -104,7 +102,6 @@ public class GraphEngine implements GraphService {
         long startTime = System.currentTimeMillis();
         this.lock.writeLock().lock();
         try {
-            this.precomputed = false;
             adj.putIfAbsent(u, new HashSet<>());
             adj.putIfAbsent(v, new HashSet<>());
             adj.get(u).add(v);
@@ -130,7 +127,6 @@ public class GraphEngine implements GraphService {
         long startTime = System.currentTimeMillis();
         this.lock.writeLock().lock();
         try {
-            this.precomputed = false;
             if (!adj.containsKey(u))
                 return;
             adj.get(u).remove(v);
@@ -261,6 +257,8 @@ public class GraphEngine implements GraphService {
     /**
      * Runs BFS from node u on all nodes in the graph, and returns a map of the
      * shortest distances from u to all nodes in the graph.
+     * takes time complexity of O(V+E) to calculate the distances from a single node
+     * to all nodes in the graph
      * 
      * @param u        the starting node
      * @param allNodes the set of all nodes in the graph
@@ -296,6 +294,7 @@ public class GraphEngine implements GraphService {
     /**
      * Computes the shortest path between all pairs of nodes in the graph, and
      * stores the results in the precomputedPaths private map.
+     * takes time complexity of O(V * (V + E))
      */
     private void computeAllPaths() {
 
@@ -304,11 +303,12 @@ public class GraphEngine implements GraphService {
             allNodes.addAll(neighbors);
         }
 
-        Map<GraphService.Pair, Integer> temp = new HashMap<>(allNodes.size() * allNodes.size());
+        Map<GraphService.Pair, Integer> temp = new ConcurrentHashMap<>(allNodes.size() * allNodes.size());
 
-        for (Integer u : allNodes) {
-            Map<Integer, Integer> distances = this.BFSAllPairs(u, allNodes);
-            for (Integer v : allNodes) {
+        for (Integer u : allNodes) { // O(V) |
+            Map<Integer, Integer> distances = this.BFSAllPairs(u, allNodes); // O(V + E) | ==> O(V * (2 * V + E)) ~
+                                                                             // O(V^2 + E)
+            for (Integer v : allNodes) { // O(V) |
                 Integer distance = distances.get(v);
                 if (distance != null) {
                     temp.put(new GraphService.Pair(u, v), distance);
@@ -317,7 +317,6 @@ public class GraphEngine implements GraphService {
         }
 
         this.precomputedPaths = temp;
-        this.precomputed = true;
     }
 
     /**
@@ -383,17 +382,13 @@ public class GraphEngine implements GraphService {
         logger.print(line);
     }
 
-    public void setPrecomputedMode(boolean precomputed) {
-        this.precomputeMode = precomputed;
-        if (precomputed) {
+    public void setPrecomputedMode(boolean on) {
+        this.precomputeMode = on;
+        if (on) {
             loadFromFile(this.filename);
             computeAllPaths();
             graphChanged = false;
         }
-    }
-
-    public boolean getPrecomputeMode() {
-        return this.precomputed;
     }
 
     private void simulateDelay() {
