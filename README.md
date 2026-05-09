@@ -335,9 +335,9 @@ python3 run_experiments.py
 ---
 
 ## References
-1. Oracle. *Java RMI Tutorial*. https://docs.oracle.com/javase/tutorial/rmi/
-2. Cormen, T. H., et al. *Introduction to Algorithms*, 3rd ed. MIT Press, 2009. (Section 22.2: Breadth-First Search)
+1. Oracle. Java RMI Tutorial. https://docs.oracle.com/javase/tutorial/rmi/
+2. `GeeksForGeeks` [Tutorial](https://www.geeksforgeeks.org/dsa/breadth-first-search-or-bfs-for-a-graph/) for BFS
 3. Java Platform SE 17 Documentation. `java.util.concurrent.locks.ReentrantReadWriteLock`.
-4. Pohl, I. *Bidirectional Search*. Machine Intelligence, 1971. (Foundational work on frontier intersection)
+4. `GeeksForGeeks` [Tutorial](https://www.geeksforgeeks.org/dsa/bidirectional-search/) Bidirectional BFS
 
 --- 
