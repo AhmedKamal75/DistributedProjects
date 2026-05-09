@@ -80,8 +80,8 @@ The system follows a classic client-server model orchestrated by a central launc
 ### 3.2 Shortest-Path Variants
 | Variant | Algorithm | Complexity | Rationale |
 |---------|-----------|------------|-----------|
-| `uni` | Standard BFS from source until target is found | O(V + E) worst-case | Baseline; simple, correct for unweighted graphs. |
-| `bi` | Bidirectional BFS (forward from source, backward from target) | O(b^(d/2)) average-case | Reduces search space significantly for long paths; requires reverse adjacency list. |
+| `uni` | Standard BFS from source until target is found | O(V + E) worst-case | Baseline; simple, correct for unweighted graphs. The standard BFS algorithm follows the classic breadth‑first traversal described in Cormen et al. [1]. |
+| `bi` | Two simultaneous BFS traversals (forward from source and backward from target) that terminate when their frontiers intersect.| O(b^(d/2)) | The bidirectional variant is inspired by Pohl’s bidirectional search [4]; it was chosen because it reduces the search space from O(b^d) to O(b^(d/2)) in typical cases, significantly lowering query latency for the dynamic graph workloads used in our experiments. |
 
 Path reconstruction uses parent maps. Distance is returned as `path.length - 1` (or `-1` if unreachable).
 
@@ -98,55 +98,142 @@ The harness (`CorrectnessHarness.java`) complies with the grading specification:
 3. Reads operations until `F`. Processes batch, prints query results (one per line), waits for next batch.
 4. Supports `uni`/`bi` modes via CLI argument.
 
+### 3.5 Logging Format
+
+#### Server Log (`log/server-log.txt`)
+Each line is a comma‑separated record emitted after an operation completes:
+```
+timestamp_ns, threadID, method, u, v, startTime_ns, duration_ns
+```
+- `timestamp_ns` : System.nanoTime() when log entry was written  
+- `threadID`     : Java thread ID that processed the operation  
+- `method`       : 'Q', 'A', or 'D'  
+- `u`, `v`       : node arguments of the operation  
+- `startTime_ns` : System.nanoTime() when the operation began (lock acquisition start)  
+- `duration_ns`  : total elapsed nanoseconds, including lock waiting, BFS, and simulated delay  
+
+#### Client Log (`log/log<i>.txt`)
+Each client writes its own log file. In **per‑operation mode** the format is:
+```
+type, u, v, start_ns, end_ns, duration_ns
+```
+In **batch mode** the format is:
+```
+BATCH_MODE, -, -, start_ns, end_ns, duration_ns, Batch Size: N, Queries: M
+```
+Fields:
+- `type`         : 'Q', 'A', 'D' (or `BATCH_MODE` for whole‑batch timing)  
+- `u`, `v`       : node arguments (or `-` for batch)  
+- `start_ns`     : client‑side System.nanoTime() before the RMI call  
+- `end_ns`       : client‑side System.nanoTime() after the call (or after exception)  
+- `duration_ns`  : `end_ns - start_ns`  
+- optional batch summary line: batch size, number of queries  
+
+Client log files reside on the same host that runs the client process (local or remote via SSH).
+
+---
+### 4.0 Environment
+All experiments were conducted on a single machine (localhost), running OpenJDK 21.0.10, with the server and all clients launched as separate JVM processes via the `start.sh` script. The graph contained 100 nodes and 1 000 randomly generated directed edges. Each configuration was repeated **5 times**; the reported values are the **median** of the per‑run averages (microseconds). Client‑side sleep (`GSP.client.operations.sleep`) in ns was set to 0 except during the frequency experiment.
+
 ---
 
-## 4. Experimental Methodology
+## 5. Experimental Methodology
 
-### 4.1 Configuration & Workload Generation
+### 5.1 Configuration & Workload Generation
 - **Graph:** 100 nodes, 1000 random directed edges (`gen_initial_graph.py`).
 - **Workloads:** Generated via `WorkloadGenerator` with configurable write percentage (`GSP.writePercent`).
 - **Sleep Units:** `GSP.client.operations.sleep` is specified in **nanoseconds** for `LockSupport.parkNanos()`.
 - **Trials:** `NUM_RUNS = 5` per configuration to average out JVM warm-up and OS scheduling noise.
 
-### 4.2 Metrics & Measurement
+### 5.2 Metrics & Measurement
 - **Response Time:** Server-side `duration` (ns) for `Q` operations, extracted from `server-log.txt`.
 - **Aggregation:** Mean and standard deviation computed per configuration; converted to microseconds for plotting.
 - **Throughput:** QPS calculated as `query_count / (t_max - t_min)`.
 
-### 4.3 Automation
+### 5.3 Automation
 `run_experiments.py` automates property mutation, system execution, log collection, parsing, aggregation, and plotting. Ensures clean state between runs and handles subprocess timeouts.
 
 ---
 
-## 5. Performance Analysis & Results
+## 6. Performance Analysis & Results
 
 All experiments were conducted on a generated graph (100 nodes, 1000 edges) with 5 repetitions per configuration.
 
-### 5.1 Response Time vs. Request Frequency
+### 6.1 Response Time vs. Request Frequency
 *Fixed: 3 clients, 30% writes, one-by-one mode.*  
 
 ![Response Time vs Frequency](plots/response_time_vs_frequency.png)
 
+**Table 1: Response time vs. request frequency (3 clients, 30% writes)**
+
+| Inter‑Request Sleep | uni Avg (μs) | uni Std (μs) | bi Avg (μs) | bi Std (μs) |
+|---------------------|--------------|--------------|-------------|-------------|
+| 0 μs                | 312.2        | 50.7         | 120.8       | 54.2        |
+| 1 μs                | 213.5        | 57.7         | 59.3        | 5.9         |
+| 10 μs               | 220.5        | 209.6        | 67.0        | 4.5         |
+| 100 μs              | 158.7        | 132.1        | 85.2        | 67.4        |
+| 1 ms                | 219.7        | 88.7         | 76.8        | 40.7        |
+| 10 ms               | 272.2        | 20.0         | 101.6       | 14.0        |
+| 100 ms              | 309.0        | 21.1         | 124.3       | 11.0        |
+
 **Observation:** The `bi` variant consistently outperforms `uni` across all sleep intervals. `uni` exhibits high variance (large error bars) at low sleep values (high frequency), indicating latency spikes caused by fair-lock queueing and JVM JIT warm-up effects. `bi` remains stable due to reduced search depth.
 
-### 5.2 Response Time vs. Write Percentage
+### 6.2 Response Time vs. Write Percentage
 *Fixed: 3 clients, high frequency, batch mode.*  
 
 ![Response Time vs Write Percentage](plots/response_time_vs_write_pct.png)
 
+**Table 2: Response time vs. write percentage (3 clients, no sleep)**
+
+| Write % | uni Avg (μs) | uni Std (μs) | bi Avg (μs) | bi Std (μs) |
+|---------|--------------|--------------|-------------|-------------|
+| 0       | 221.0        | 31.7         | 59.1        | 12.2        |
+| 10      | 273.5        | 4.6          | 76.9        | 8.0         |
+| 20      | 340.3        | 33.2         | 118.0       | 40.8        |
+| 30      | 312.2        | 50.7         | 120.8       | 54.2        |
+| 40      | 357.6        | 26.8         | 139.3       | 12.9        |
+| 50      | 346.7        | 28.9         | 152.2       | 18.2        |
+| 60      | 401.3        | 47.7         | 154.9       | 3.5         |
+| 70      | 386.4        | 27.4         | 177.5       | 48.6        |
+| 80      | 591.9        | 297.6        | 168.8       | 78.7        |
+| 90      | 430.2        | 121.1        | 171.4       | 13.0        |
+
 **Observation:** `bi` latency remains nearly flat (~100–180 μs) regardless of write ratio. `uni` shows a pronounced spike at 80% writes. This is a direct consequence of the fair read-write lock: as write operations dominate, reader threads are queued behind writers, causing starvation-like latency peaks. The behavior validates correct lock semantics but highlights a known throughput bottleneck under write-heavy loads.
 
-### 5.3 Scalability: Number of Clients (Basic & Stress)
+### 6.3 Scalability: Number of Clients (Basic & Stress)
 *Fixed: 30% writes, high frequency, batch mode.*  
+
 ![Response Time vs Number of Clients](plots/response_time_vs_num_clients.png)
 
+**Table 3: Response time vs. number of clients (30% writes, no sleep)**
+
+| Clients | uni Avg (μs) | uni Std (μs) | bi Avg (μs) | bi Std (μs) |
+|---------|--------------|--------------|-------------|-------------|
+| 1       | 351.5        | 126.2        | 89.3        | 31.8        |
+| 2       | 196.2        | 19.0         | 52.1        | 3.4         |
+| 3       | 312.2        | 50.7         | 120.8       | 54.2        |
+| 4       | 401.5        | 29.6         | 249.8       | 30.5        |
+| 5       | 572.5        | 102.6        | 332.2       | 124.0       |
+
+
 ![Response Time vs Number of Clients Stress](plots/response_time_vs_num_clients_stress.png)
+
+**Table 4: Response time under stress (30% writes, no sleep)**
+
+| Clients | uni Avg (μs) | uni Std (μs) | bi Avg (μs) | bi Std (μs) |
+|---------|--------------|--------------|-------------|-------------|
+| 5       | 572.5        | 102.6        | 332.2       | 124.0       |
+| 7       | 728.5        | 208.1        | 425.6       | 61.5        |
+| 9       | 1042.6       | 35.7         | 587.7       | 97.1        |
+| 11      | 1212.2       | 189.9        | 824.3       | 102.7       |
+| 13      | 1223.4       | 110.9        | 789.6       | 73.0        |
+| 15      | 1511.6       | 346.9        | 1038.8      | 149.8       |
 
 **Observation:** 
 - **Basic [1–5]:** Both variants scale sub-linearly initially. `bi` maintains a ~50–60% latency advantage. The dip at 2 clients is attributed to statistical variance across 5 runs and JVM optimization effects.
 - **Stress [5–15]:** `uni` degrades linearly (reaching ~1500 μs at 15 clients), confirming algorithmic and lock contention bottlenecks. `bi` scales more gracefully (~1000 μs at 15 clients), demonstrating that reduced node exploration offsets concurrency overhead.
 
-### 5.4 Summary Table (Median Query Response Time, μs)
+### 6.4 Summary Table (Median Query Response Time, μs)
 | Configuration          | `uni` (μs) | `bi` (μs) | Improvement |
 |------------------------|------------|-----------|-------------|
 | Low Freq (100 ms sleep) | 310        | 125       | ~240%        |
@@ -155,7 +242,7 @@ All experiments were conducted on a generated graph (100 nodes, 1000 edges) with
 
 ---
 
-## 6. Design Decisions & Rationale
+## 7. Design Decisions & Rationale
 
 | Decision | Rationale |
 |----------|-----------|
@@ -167,7 +254,7 @@ All experiments were conducted on a generated graph (100 nodes, 1000 edges) with
 
 ---
 
-## 7. Conclusion
+## 8. Conclusion
 This project successfully implements a distributed, RMI-based dynamic shortest-path system that satisfies all functional and concurrency requirements. The bidirectional BFS variant consistently outperforms the unidirectional baseline in latency and scalability. Performance analysis reveals that while the fair locking strategy ensures correctness, it becomes a bottleneck under write-heavy or high-concurrency workloads—a trade-off explicitly acknowledged and documented.
 
 ---
@@ -188,8 +275,8 @@ All parameters are stored in `system.properties`.
 | `GSP.operations.per.batch` | Operations per generated batch | `500` |
 | `GSP.batchMode` | `true` = batch RMI, `false` = per-op | `true` |
 | `GSP.bidirectionalMode` | `true` = Bi-BFS, `false` = Uni-BFS | `false` |
-| `GSP.client.operations.sleep` | Max inter-request sleep (**ms**) | `0` |
-| `GSP.server.operations.sleep` | Simulated server delay (**ms**) | `0` |
+| `GSP.client.operations.sleep` | Max inter-request sleep (**ns**) | `0` |
+| `GSP.server.operations.sleep` | Simulated server delay (**ns**) | `0` |
 | `GSP.client.timeout.seconds` | Max wait for client processes | `180` |
 
 ---
