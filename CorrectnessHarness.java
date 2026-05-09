@@ -10,13 +10,13 @@ public class CorrectnessHarness {
     public static void main(String[] args) throws Exception {
         if (args.length < 1) {
             System.err.println(
-                    "Usage: BatchServer <variant>\n<variant> could be 'ondemand' or 'all'.\nondemand is to calc results on the fly.\nall is to precompute all results beforehand.");
+                    "Usage: BatchServer <variant>\n<variant> could be 'uni' or 'bi'.\nuni is for the uni-directional BFS mode.\nbi is for the bi-directional BFS mode.");
             System.exit(1);
         }
-        boolean precompute = args.length > 0 && args[0].equalsIgnoreCase("all");
+        boolean bidirectionalMode = args.length > 0 && args[0].equalsIgnoreCase("bi");
 
         GraphEngine engine = new GraphEngine(null, "log/correctness_logs.csv", true, 10);
-        engine.setPrecomputedMode(precompute);
+        engine.setBidirectionalMode(bidirectionalMode);
 
         BufferedReader in = new BufferedReader(new InputStreamReader(System.in));
         String line;

@@ -9,7 +9,7 @@ public interface GraphService extends Remote {
     public record Operation(char operationType, int u, int v) implements Serializable {
     }
 
-    public record Pair(int x, int y) {
+    public record Pair(int x, int y) implements Serializable {
     }
 
     public int query(int u, int v) throws RemoteException;

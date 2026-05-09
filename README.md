@@ -1,318 +1,256 @@
-# Distributed Graph Service
-
-A distributed system for answering shortest‑path queries on a **dynamic, directed, unweighted graph**,
-built with Java RMI. The system supports concurrent operations, two algorithm variants for performance
-comparison, batch processing for automatic grading, and logging for performance analysis.
-
-**Course:** CS432 – Distributed Systems and Net‑Centric Computing  
-**Date:** Spring 2026  
-
+# Distributed Graph Service: Incremental Shortest-Path Calculation
+**Course:** CS432 – Distributed Systems and Net-Centric Computing  
+**Institution:** Alexandria University, Faculty of Engineering  
 
 ---
 
-## Table of Contents
+## Abstract
+This project implements a distributed RMI-based system for answering shortest-path queries on a dynamic, directed, unweighted graph. The system supports concurrent client operations while preserving strict sequential semantics within each workload batch. Two algorithmic variants are implemented and compared: a standard unidirectional BFS (`uni`) and a bidirectional BFS (`bi`). Performance is evaluated across request frequency, write-operation ratio, and concurrent client load (including stress testing up to 15 clients). Experimental results demonstrate that the bidirectional variant consistently reduces query latency and scales more effectively under high concurrency and write-heavy workloads, while the fair read-write locking strategy guarantees correct batch ordering at the cost of predictable contention spikes under heavy writes.
 
-- [Overview](#overview)
-- [Architecture](#architecture)
-- [Two Shortest‑Path Variants](#two-shortest-path-variants)
-- [Graph Engine Internals](#graph-engine-internals)
-- [Concurrency Model](#concurrency-model)
-- [Batch Protocol & Correctness Harness](#batch-protocol--correctness-harness)
-- [Distributed Deployment](#distributed-deployment)
-- [Configuration](#configuration)
-- [Build & Run](#build--run)
-- [Logging & Performance Data](#logging--performance-data)
-- [Performance Experiments](#performance-experiments)
-- [Design Decisions & Rationale](#design-decisions--rationale)
-- [File Structure](#file-structure)
-- [References](#references)
+---
+## Table of Content
+1. [Introduction](#1-introduction)
+2. [System Architecture](#2-system-architecture)
+3. [Implementation Details](#3-implementation-details)
+4. [Experimental Methodology](#4-experimental-methodology)
+5. [Performance Analysis & Results](#5-performance-analysis--results)
+6. [Design Decisions & Rationale](#6-design-decisions--rationale)
+7. [Conclusion](#7-conclusion)
+8. [Appendices](#appendix-a-configuration-reference)
 
 ---
 
-## Overview
+## 1. Introduction
+The shortest-path problem is a cornerstone of graph theory with applications in routing, navigation, and network analysis. In dynamic environments, graphs evolve continuously, requiring systems that can efficiently handle interleaved edge insertions/deletions and distance queries. This project addresses the challenge of maintaining correct shortest-path answers in a distributed setting using Java RMI.
 
-The system maintains a **directed graph** and supports three operations:
-
-| Operation | Symbol | Description |
-|-----------|--------|-------------|
-| Query     | `Q u v`| Returns the shortest directed distance from `u` to `v` (or `-1` if no path). |
-| Add edge  | `A u v`| Adds directed edge `u→v`. Creates nodes if they don’t exist. |
-| Delete edge | `D u v` | Removes edge `u→v`. Does nothing if the edge doesn’t exist. |
-
-The system works in two modes:
-
-1. **Interactive Distributed Mode** – an RMI server receives batches from multiple remote clients.
-2. **Batch Processing Mode** – a standalone harness (`CorrectnessHarness`) reads standard input and outputs query results, used for automatic grading.
+The primary objectives are:
+1. Implement a correct RMI-based client-server architecture for dynamic graph operations.
+2. Ensure sequential consistency within operation batches while allowing concurrent execution.
+3. Develop and compare two shortest-path algorithms (unidirectional vs. bidirectional BFS).
+4. Conduct systematic performance analysis across frequency, write ratio, and concurrency dimensions.
 
 ---
 
-## Architecture
+## 2. System Architecture
+The system follows a classic client-server model orchestrated by a central launcher.
 
 ```
 ┌──────────────────────────────────────────┐
-│            Start.java (main)             │
+│            Start.java (Orchestrator)     │
 │  1. Load system.properties               │
-│  2. Start RMI server thread              │
+│  2. Launch RMI server thread             │
 │  3. Generate workload batches            │
-│  4. Launch client processes              │
-│  5. Wait for clients, then shut down     │
-└───────┬──────────────────────┬───────────┘
+│  4. Spawn client processes (local/SSH)   │
+│  5. Wait for completion & shutdown       │
+└───────┬──────────────────────┬───────────
         │                      │
         ▼                      ▼
 ┌──────────────┐    ┌─────────────────────┐
-│  Server (RMI)│    │  Client Process(es) │
-│  GraphEngine │◄───│  (separate JVMs)    │
-│  (remote obj)│    └─────────────────────┘
+│  Server (RMI)│    │  Client Processes   │
+│  GraphEngine │◄───│  (per-node JVMs)    │
+│  (Remote Obj)│    └─────────────────────┘
 └──────────────┘
         ▲
         │
 ┌──────────────┐
-│  Shared      │
-│  Interface   │
-│ GraphService │
+│  shared/     │
+│ GraphService │ (Remote Interface)
 └──────────────┘
 ```
 
-- **Server** – hosts the `GraphEngine` (the actual graph). It registers itself with an RMI registry.
-- **Client** – a separate process (launched locally or via SSH) that reads batch files, connects to the RMI server, sends operations, and logs results.
-- **Shared Interface** – `GraphService` declares the remote methods (`query`, `addEdge`, `deleteEdge`, `processBatch`). It also contains record classes `Operation` and `Pair`.
-- **Start.java** – the coordinator: starts the server thread, generates random workload batches using `WorkloadGenerator`, spawns client processes, and manages shutdown.
+### Core Components
+| Component | Responsibility |
+|-----------|----------------|
+| `Start.java` | Reads configuration, launches server, generates batches, spawns clients, handles graceful shutdown. |
+| `Server.java` | Bootstraps RMI registry, exports `GraphEngine`, prints `R\n` ready signal, manages lifecycle. |
+| `GraphEngine.java` | Core graph logic. Maintains adjacency/reverse-adjacency maps, implements BFS variants, enforces concurrency control. |
+| `Client.java` | Loads operation batches, communicates via RMI (batch or per-op mode), logs client-side metrics, exports results. |
+| `GraphService.java` | Remote interface declaring `query`, `addEdge`, `deleteEdge`, `processBatch`, and serializable records. |
+| `CorrectnessHarness.java` | Standalone stdin/stdout wrapper for automatic grading (reads graph → prints `R` → processes batches → outputs answers). |
 
 ---
 
-## Two Shortest‑Path Variants
+## 3. Implementation Details
 
-The project requires **two different methods** for answering shortest‑path queries to compare performance.
+### 3.1 Data Structures & Graph Representation
+- **Forward Adjacency List:** `Map<Integer, Set<Integer>> adj` stores outgoing edges.
+- **Reverse Adjacency List:** `Map<Integer, Set<Integer>> reverseAdj` enables backward traversal for bidirectional search.
+- Both maps are lazily populated during `loadFromFile()` and dynamically updated during `addEdge`/`deleteEdge`.
 
-### Variant 1 – On‑demand BFS (baseline)
-- **Mode identifier:** `ondemand`
-- A classic Breadth‑First Search is run **for every query**.
-- Time per query: O(V + E) where V, E are the current graph size.
-- Used when `precomputeMode = false`.
+### 3.2 Shortest-Path Variants
+| Variant | Algorithm | Complexity | Rationale |
+|---------|-----------|------------|-----------|
+| `uni` | Standard BFS from source until target is found | O(V + E) worst-case | Baseline; simple, correct for unweighted graphs. |
+| `bi` | Bidirectional BFS (forward from source, backward from target) | O(b^(d/2)) average-case | Reduces search space significantly for long paths; requires reverse adjacency list. |
 
-### Variant 2 – Precomputed All‑Pairs Shortest Paths (APSP)
-- **Mode identifier:** `all`
-- After the initial graph is loaded (and before any batch processing), a **full distance matrix is recomputed**.
-- Every query becomes an O(1) lookup in a `Map<Pair, Integer>`.
-- Re‑computation happens at the beginning of each batch (if the graph changed). This amortises to O(V * (2 * V + E)) ~ O(V^2 + E) cost over the adjacency list.
-- Used when `precomputeMode = true`.
+Path reconstruction uses parent maps. Distance is returned as `path.length - 1` (or `-1` if unreachable).
 
-**Switching between variants** is done via the configuration property `GSP.precomputeMode` or by passing `ondemand` / `all` to `CorrectnessHarness`.
+### 3.3 Concurrency Model & Batch Semantics
+- **Locking:** `ReentrantReadWriteLock(true)` (fair mode) ensures threads are served in arrival order.
+- **Read Operations:** `query()` acquires read lock; multiple queries execute concurrently.
+- **Write Operations:** `addEdge()`/`deleteEdge()` acquire write lock; exclusive access guarantees graph consistency.
+- **Batch Processing:** `processBatch()` iterates operations sequentially. While the spec allows concurrent execution within a batch, sequential processing with a fair lock naturally preserves the required ordering: each query sees all preceding modifications and none of the subsequent ones.
 
----
-
-## Graph Engine Internals
-
-### Data Structures
-- **Adjacency list**: `Map<Integer, Set<Integer>> adj` – the core graph.
-- **Distance cache (APSP)**: `Map<GraphService.Pair, Integer> precomputedPaths`.
-  *In APSP mode*, this map is replaced atomically after recomputation (using a new `HashMap`), and the field is `volatile` to ensure visibility without locks after the initial write.
-- **Locks**: `ReentrantReadWriteLock(true)` (fair) guarantees that readers and writers are served in arrival order, essential for preserving operation order within a batch.
-
-### Algorithms
-- **BFS**: standard queue‑based traversal. Chosen because the graph is **unweighted** and BFS gives the exact shortest path in linear time.
-- **APSP recomputation**: For each node `u`, a single BFS discovers distances to all reachable nodes (`BFSAllPairs`). This avoids running a full BFS for every pair separately.
-- **Path reconstruction**: The BFS keeps a `parent` map and reconstructs the path when the target is found. Not strictly needed for distance only, but available for future use.
+### 3.4 Correctness Harness
+The harness (`CorrectnessHarness.java`) complies with the grading specification:
+1. Reads edge list until `S` is encountered.
+2. Prints `R\n` to signal readiness.
+3. Reads operations until `F`. Processes batch, prints query results (one per line), waits for next batch.
+4. Supports `uni`/`bi` modes via CLI argument.
 
 ---
 
-## Concurrency Model
+## 4. Experimental Methodology
 
-The server must be **non‑blocking** and handle multiple RMI calls simultaneously while **preserving operation order** within each batch.
+### 4.1 Configuration & Workload Generation
+- **Graph:** 100 nodes, 1000 random directed edges (`gen_initial_graph.py`).
+- **Workloads:** Generated via `WorkloadGenerator` with configurable write percentage (`GSP.writePercent`).
+- **Sleep Units:** `GSP.client.operations.sleep` is specified in **nanoseconds** for `LockSupport.parkNanos()`.
+- **Trials:** `NUM_RUNS = 5` per configuration to average out JVM warm-up and OS scheduling noise.
 
-- **Fair Read‑Write Lock**:  
-  - Queries acquire a **read lock**; many queries can run concurrently.
-  - Add/Delete operations acquire a **write lock**; they are exclusive.
-  - The fair mode ensures that threads are served in the order they requested the lock, which naturally preserves the sequential order of operations inside a batch when the batch is processed sequentially.
-- **APSP recomputation**: In `processBatch`, if `precomputeMode` is on and the graph has changed, a **write lock** is acquired to safely recompute the distance matrix. This blocks all other operations until the recomputation finishes, which is acceptable because writes are infrequent.
-- **Volatile flags**: `graphChanged` is `volatile` so that changes are immediately visible to all threads. `precomputedPaths` is also volatile because it is replaced entirely during recomputation.
+### 4.2 Metrics & Measurement
+- **Response Time:** Server-side `duration` (ns) for `Q` operations, extracted from `server-log.txt`.
+- **Aggregation:** Mean and standard deviation computed per configuration; converted to microseconds for plotting.
+- **Throughput:** QPS calculated as `query_count / (t_max - t_min)`.
 
----
-
-## Batch Protocol & Correctness Harness
-
-To comply with the grading specification, the class `CorrectnessHarness` reads **from standard input** and writes **to standard output** exactly as required:
-
-1. Read the initial graph lines (pairs of integers) until a line containing `S`.
-2. Print `R` (ready).
-3. Then repeatedly read operation lines until `F`. When `F` is seen, process the entire batch (if on all mode) else it process the operations one at a time and store the queries results till `F` if encountered, print the query results (one per line), and wait for the next batch.
-
-**Usage:**
-```bash
-./correctness.sh ondemand   < input.txt
-./correctness.sh all        < input.txt
-```
-
-This harness does **not** use RMI; it instantiates the engine directly. It is the entry point for automatic grading.
+### 4.3 Automation
+`run_experiments.py` automates property mutation, system execution, log collection, parsing, aggregation, and plotting. Ensures clean state between runs and handles subprocess timeouts.
 
 ---
 
-## Distributed Deployment
+## 5. Performance Analysis & Results
 
-### Remote Process Launch
-`Start.java` launches a **separate JVM** for each client:
-- **Local nodes** (host = `localhost` or `127.0.0.1`): the `java` command is called directly via `ProcessBuilder`.
-- **Remote nodes** (any other host): an `ssh` command is built that changes to the project directory and executes the same Java command.
+All experiments were conducted on a generated graph (100 nodes, 1000 edges) with 5 repetitions per configuration.
 
-All client processes inherit the current classpath. The system waits up to `GSP.client.timeout.seconds` for each client to finish.
+### 5.1 Response Time vs. Request Frequency
+*Fixed: 3 clients, 30% writes, one-by-one mode.*  
 
-### Server Lifecycle
-- The server runs in a **daemon‑like thread** inside `Start`’s JVM.
-- After registering itself, the server thread enters an infinite sleep (`while(true) Thread.sleep(...)`) to keep the RMI registry alive.
-- A shutdown hook unbinds the service on exit.
-- When clients finish, `Start` calls `server.stop()` to cleanly unbind and unexport the remote object.
+![Response Time vs Frequency](plots/response_time_vs_frequency.png)
+
+**Observation:** The `bi` variant consistently outperforms `uni` across all sleep intervals. `uni` exhibits high variance (large error bars) at low sleep values (high frequency), indicating latency spikes caused by fair-lock queueing and JVM JIT warm-up effects. `bi` remains stable due to reduced search depth.
+
+### 5.2 Response Time vs. Write Percentage
+*Fixed: 3 clients, high frequency, batch mode.*  
+
+![Response Time vs Write Percentage](plots/response_time_vs_write_pct.png)
+
+**Observation:** `bi` latency remains nearly flat (~100–180 μs) regardless of write ratio. `uni` shows a pronounced spike at 80% writes. This is a direct consequence of the fair read-write lock: as write operations dominate, reader threads are queued behind writers, causing starvation-like latency peaks. The behavior validates correct lock semantics but highlights a known throughput bottleneck under write-heavy loads.
+
+### 5.3 Scalability: Number of Clients (Basic & Stress)
+*Fixed: 30% writes, high frequency, batch mode.*  
+![Response Time vs Number of Clients](plots/response_time_vs_num_clients.png)
+
+![Response Time vs Number of Clients Stress](plots/response_time_vs_num_clients_stress.png)
+
+**Observation:** 
+- **Basic [1–5]:** Both variants scale sub-linearly initially. `bi` maintains a ~50–60% latency advantage. The dip at 2 clients is attributed to statistical variance across 5 runs and JVM optimization effects.
+- **Stress [5–15]:** `uni` degrades linearly (reaching ~1500 μs at 15 clients), confirming algorithmic and lock contention bottlenecks. `bi` scales more gracefully (~1000 μs at 15 clients), demonstrating that reduced node exploration offsets concurrency overhead.
+
+### 5.4 Summary Table (Median Query Response Time, μs)
+| Configuration          | `uni` (μs) | `bi` (μs) | Improvement |
+|------------------------|------------|-----------|-------------|
+| Low Freq (100 ms sleep) | 310        | 125       | ~240%        |
+| High Write (80%)       | 595        | 175       | ~340%        |
+| Stress (15 clients)    | 1510       | 1040      | ~145%        |
 
 ---
 
-## Configuration
+## 6. Design Decisions & Rationale
 
-All parameters are stored in `system.properties`. The following table explains every key:
+| Decision | Rationale |
+|----------|-----------|
+| **Fair `ReentrantReadWriteLock`** | Guarantees sequential ordering within batches as required by the spec. Prevents writer starvation but introduces predictable latency under high write ratios. |
+| **Bidirectional BFS** | Explores O(b^(d/2)) nodes instead of O(b^d). Requires reverse adjacency list but yields significant latency reduction for medium/long paths. |
+| **Batch Processing via RMI** | Reduces network round-trips. Clients send `Operation[]` arrays, minimizing serialization overhead and aligning with the grader's batch semantics. |
+| **Separate Correctness Harness** | Grading requires stdin/stdout interaction. Embedding RMI would complicate automated testing. The harness directly instantiates `GraphEngine`, ensuring identical logic without network overhead. |
+| **Auto-flush Logger** | `PrintWriter` initialized with `autoFlush=true` prevents log loss on unexpected termination or mid-batch crashes. |
+
+---
+
+## 7. Conclusion
+This project successfully implements a distributed, RMI-based dynamic shortest-path system that satisfies all functional and concurrency requirements. The bidirectional BFS variant consistently outperforms the unidirectional baseline in latency and scalability. Performance analysis reveals that while the fair locking strategy ensures correctness, it becomes a bottleneck under write-heavy or high-concurrency workloads—a trade-off explicitly acknowledged and documented.
+
+---
+
+## Appendix A. Configuration Reference
+All parameters are stored in `system.properties`.
 
 | Property | Description | Example |
 |----------|-------------|---------|
-| `GSP.server` | Host where the RMI registry & server run | `localhost` |
-| `GSP.server.port` | Port on which the server socket listens (0 = any) | `49053` |
-| `GSP.rmiregistry.port` | Port for the RMI registry | `1099` |
-| `GSP.serviceName` | Name the server binds to | `GraphEngine` |
-| `GSP.graph.file` | Path to the initial graph file | `data/intial_graph.txt` |
-| `GSP.numberOfnodes` | Number of client processes to launch | `3` |
-| `GSP.node0`, `GSP.node1`, … | Host for each client | `localhost` |
-| `GSP.writePercent` | Percentage of writes (0–100) in generated batches | `30` |
-| `GSP.operations.per.batch` | Number of operations per generated batch | `50` |
-| `GSP.batchMode` | `true` → clients use `processBatch`; `false` → one-by-one | `true` |
-| `GSP.precomputeMode` | `true` = APSP variant, `false` = BFS variant | `false` |
-| `GSP.server.verbose` | Enable server logging | `true` |
-| `GSP.client.verbose` | Enable client logging | `true` |
-| `GSP.server.log.directory` | Server log directory prefix (inside append like `server-log.txt`) | `log/` |
-| `GSP.client.log.directory` | Client log directory prefix | `log/` |
-| `GSP.data.directory` | Where batch input/output files are stored | `data/` |
-| `GSP.client.operations.sleep` | Maximum inter‑request sleep for clients (ms) | `0` |
-| `GSP.server.operations.sleep` | Simulated processing delay inside server (ms) | `0` |
-| `GSP.client.timeout.seconds` | Max wait time for each client process | `120` |
-
-*Note: The original spec uses `miregistry`, we maintain `rmiregistry` for consistency.*
+| `GSP.server` | Host where RMI registry & server run | `localhost` |
+| `GSP.server.port` | Server socket port (0 = any) | `49053` |
+| `GSP.rmiregistry.port` | RMI registry port | `1099` |
+| `GSP.serviceName` | Binding name in registry | `GraphEngine` |
+| `GSP.graph.file` | Path to initial graph file | `graph/initial_graph.txt` |
+| `GSP.numberOfnodes` | Number of client processes | `3` |
+| `GSP.node<i>` | Host for client `i` | `localhost` |
+| `GSP.writePercent` | Percentage of writes (0–100) | `30` |
+| `GSP.operations.per.batch` | Operations per generated batch | `500` |
+| `GSP.batchMode` | `true` = batch RMI, `false` = per-op | `true` |
+| `GSP.bidirectionalMode` | `true` = Bi-BFS, `false` = Uni-BFS | `false` |
+| `GSP.client.operations.sleep` | Max inter-request sleep (**ms**) | `0` |
+| `GSP.server.operations.sleep` | Simulated server delay (**ms**) | `0` |
+| `GSP.client.timeout.seconds` | Max wait for client processes | `180` |
 
 ---
 
-## Build & Run
+## Appendix B. Build & Run Instructions
 
-### Quick Start
+### Compilation
 ```bash
-# Build and Run the Start system
-./start.sh
-
-# Or compile & run manually
+./compile.sh
+# or manually:
 javac -d classes shared/*.java client/*.java server/*.java *.java
+```
+
+### Distributed Execution
+```bash
+./start.sh
+# or:
 java -cp classes Start
 ```
 
-### Correctness Test (stdin/stdout)
+### Grading Harness
 ```bash
-./correctness.sh ondemand < test_input.txt
-./correctness.sh all       < test_input.txt
+./correctness.sh uni   < input.txt
+./correctness.sh bi    < input.txt
 ```
 
-### Clean Compilation
-The scripts `correctness.sh` and `start.sh` clean the `classes/` directory before compiling.  
-`log/` and `data/` directories will be created automatically if they didn't exist.
+### Automated Experiments
+```bash
+python3 run_experiments.py
+# Outputs plots to ./plots/ and raw/aggregated CSVs to ./experiments/
+```
 
 ---
 
-## Logging & Performance Data
-
-### Server Log
-Location: `log/server-log.txt`.  
-Format: `timestamp, threadId, operationType, u, v, startTime, duration` (CSV).  
-Every remote call (even those inside a batch) is logged. A final flush happens after each batch.
-
-### Client Logs
-Location: `log/log0.txt`, `log/log1.txt`, …  
-Format (batch mode): `BATCH_MODE,-,-,startTime,endTime,duration,Batch Size: N`  
-Format (one‑by‑one): `operationType,u,v,startTime,endTime,duration`
-
-These logs contain all the raw data needed for the performance analysis.
-
----
-
-## Performance Experiments
-
-The assignment requires three sets of experiments for **both** variants. The logged data (response time per operation) can be post‑processed.
-
-1. **Response time vs. frequency of requests**  
-   Change `GSP.client.operations.sleep` (lower → higher frequency). Run with a fixed number of clients and write percentage.
-
-2. **Response time vs. percentage of add/delete operations**  
-   Vary `GSP.writePercent` (0, 20, 40, 60, 80, 100). Keep other parameters constant.
-
-3. **Response time vs. number of client nodes [1,5]** (basic) and **[5,15]** (stress)  
-   Change `GSP.numberOfnodes` and set `GSP.node<i>` accordingly.
-
-For each configuration, run multiple trials and compute the **average or median query response time** (excluding write operations). The server logs also allow measuring throughput.
-
-*TODO:* Write a small python script to parse the logs and compute summary statistics.
-
----
-
-## Design Decisions & Rationale
-
-1. **Why BFS?**  
-   The graph is unweighted. BFS finds exact shortest paths in O(V+E) without the complexity of Dijkstra or bidirectional search, making it both simple and efficient.
-
-2. **Why fair ReadWriteLock?**  
-   Fairness guarantees that within a batch, operations are applied in the order they arrive from the sequencer (the single client thread). This ensures each query sees all preceding updates, satisfying the specification.
-
-3. **Why volatile `graphChanged` and `precomputedPaths`?**  
-   `graphChanged` is a simple flag, `volatile` provides visibility across threads without a lock. `precomputedPaths` is replaced entirely during recomputation, so `volatile` ensures clients see the new map immediately.
-
-4. **Why `ConcurrentHashMap` for `precomputedPaths`?**  
-   Although we only read after recomputation (no concurrent writes), the map is created as `ConcurrentHashMap` to allow safe reads if a thread accesses it before the volatile assignment is seen – extra safety at minimal cost.
-
-5. **Why recompute APSP at the start of a batch, not after every write?**  
-   A batch may contain multiple writes. Computing once at the beginning of the batch (before any query is answered) correctly reflects all modifications, reduces recomputation overhead, and still produces correct results.
-
-6. **Why use `processBatch` for clients by default?**  
-   It reduces the number of RMI round‑trips, which improves performance and more closely models the batch semantics required by the grader.
-
-7. **Why separate `CorrectnessHarness` from the RMI system?**  
-   The grader expects a single program reading stdin/writing stdout. Embedding a full RMI stack would complicate deployment. The harness directly uses the engine, providing identical logic without network overhead.
-
----
-
-## File Structure
-
+## Appendix C. File Structure
 ```
 .
-├── README.md
-├── start.sh
-├── correctness.sh
-├── system.properties
-├── Start.java
-├── WorkloadGenerator.java
-├── CorrectnessHarness.java
-├── shared/
-│   └── GraphService.java
+├── README.md                  # Project report & documentation
+├── Start.java                 # Orchestrator
+├── WorkloadGenerator.java     # Batch generator
+├── CorrectnessHarness.java    # Grading stdin/stdout wrapper
+├── shared/GraphService.java   # RMI interface & records
 ├── server/
-│   ├── GraphEngine.java
-│   └── Server.java
-├── client/
-│   └── Client.java
-├── data/
-│   ├── intial_graph.txt
-│   ├── patch_queries.txt    (sample)
-│   └── output*.txt
-├── log/
-│   ├── server_logs.csv
-│   └── log*.txt
-└── classes/                  (compiled .class files)
+│   ├── GraphEngine.java       # Core logic & concurrency
+│   └── Server.java            # RMI bootstrap
+├── client/Client.java         # RMI client & logging
+├── python_scripts/
+│   ├── gen_initial_graph.py   # Graph generator
+│   └── run_experiments.py     # Automation & plotting
+── graph/initial_graph.txt    # Default graph
+├── data/                      # Batch inputs/outputs
+├── log/                       # Server & client logs
+└── classes/                   # Compiled bytecode
 ```
 
 ---
 
 ## References
+1. Oracle. *Java RMI Tutorial*. https://docs.oracle.com/javase/tutorial/rmi/
+2. Cormen, T. H., et al. *Introduction to Algorithms*, 3rd ed. MIT Press, 2009. (Section 22.2: Breadth-First Search)
+3. Java Platform SE 17 Documentation. `java.util.concurrent.locks.ReentrantReadWriteLock`.
+4. Pohl, I. *Bidirectional Search*. Machine Intelligence, 1971. (Foundational work on frontier intersection)
 
-- Java RMI Tutorial: [Oracle RMI Overview](http://docs.oracle.com/javase/tutorial/rmi/overview.html)
-// page 594 of book 22.2 from introduction to Algorithms 3rd edition 
-- BFS algorithm: standard introduction (Cormen, Leiserson, Rivest, Stein) (3rd ed.) [link](https://www.cs.mcgill.ca/~akroit/math/compsci/Cormen%20Introduction%20to%20Algorithms.pdf)
-- `ReentrantReadWriteLock` fairness: Java Platform SE 17 documentation.
-
----
+--- 

@@ -16,20 +16,17 @@ import java.util.List;
 import java.util.Map;
 import java.util.Queue;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import shared.GraphService;
 
 public class GraphEngine implements GraphService {
     private Map<Integer, Set<Integer>> adj;
-    private volatile Map<GraphService.Pair, Integer> precomputedPaths;
+    private Map<Integer, Set<Integer>> reverseAdj;
     private final ReentrantReadWriteLock lock;
     private final PrintWriter logger;
     private final boolean verbose;
-    private boolean precomputeMode; // true = ASPPS, false = BFS
-    private volatile boolean graphChanged; // volatile is for thread safety that makes variable value visible to all
-                                           // threads
+    private boolean BidirectionalMode;
     private String filename;
     private int simulatedDelayMs;
 
@@ -40,52 +37,39 @@ public class GraphEngine implements GraphService {
     public GraphEngine(String filename, String logfilePath, boolean verbose, int simulatedDelayMs) {
         this.filename = filename;
         this.adj = new HashMap<>();
-        this.precomputedPaths = new ConcurrentHashMap<>();// HashMap<>();
+        this.reverseAdj = new HashMap<>();
         this.lock = new ReentrantReadWriteLock(true);
         this.verbose = verbose;
-        this.precomputeMode = false;
-        this.graphChanged = false;
+        this.BidirectionalMode = false;
         PrintWriter tempLogger = null;
         this.simulatedDelayMs = simulatedDelayMs;
 
         if (logfilePath != null) {
             try {
-                tempLogger = new PrintWriter(new BufferedWriter(new FileWriter(new File(logfilePath), true)));
+                File logFile = new File(logfilePath);
+                if (logFile.getParentFile() != null && !logFile.getParentFile().exists()) {
+                    logFile.getParentFile().mkdirs();
+                }
+
+                tempLogger = new PrintWriter(new BufferedWriter(new FileWriter(logFile, true)), true);
             } catch (IOException e) {
-                System.out.println("Failed to create log file: " + e);
+                System.err.println("Failed to create log file: " + e.getMessage());
             }
         }
 
         this.logger = tempLogger;
     }
 
-    /**
-     * Queries the shortest distance between two nodes in the graph.
-     * 
-     * @param u the starting node
-     * @param v the target node
-     * @return the shortest distance between u and v,
-     *         or -1 if no path exists, or if u or v is not in the graph,
-     *         or 0 if u == v.
-     */
     @Override
     public int query(int u, int v) throws RemoteException {
         long startTime = System.nanoTime();
-        final long startNano = System.nanoTime();
-        this.lock.readLock().lock(); // acquire read lock
+        this.lock.readLock().lock();
         try {
-            if (precomputeMode && !this.graphChanged) {
-                return this.precomputedPaths.getOrDefault(new GraphService.Pair(u, v), -1);
-            } else {
-                Integer[] path = this.BFS(u, v);
-                if (path == null)
-                    return -1;
-                return path.length - 1;
-            }
+            Integer[] path = this.BidirectionalMode ? bidirectionalBFS(u, v) : this.BFS(u, v);
+            return (path == null) ? -1 : path.length - 1;
         } finally {
-            long duration = System.nanoTime() - startNano;
-
-            this.lock.readLock().unlock(); // release read lock
+            long duration = System.nanoTime() - startTime;
+            this.lock.readLock().unlock();
             simulateDelay();
             log("Q", u, v, startTime, duration);
         }
@@ -102,18 +86,24 @@ public class GraphEngine implements GraphService {
         final long startNano = System.nanoTime();
         this.lock.writeLock().lock();
         try {
-            adj.putIfAbsent(u, new HashSet<>());
-            adj.putIfAbsent(v, new HashSet<>());
-            adj.get(u).add(v);
-            if (this.precomputeMode)
-                this.graphChanged = true;
+            addEdgeInternal(u, v);
         } finally {
             long duration = System.nanoTime() - startNano;
-
             this.lock.writeLock().unlock();
             simulateDelay();
             log("A", u, v, startNano, duration);
         }
+    }
+
+    private void addEdgeInternal(int u, int v) {
+        adj.putIfAbsent(u, new HashSet<>());
+        adj.putIfAbsent(v, new HashSet<>());
+        adj.get(u).add(v);
+
+        reverseAdj.putIfAbsent(v, new HashSet<>());
+        reverseAdj.putIfAbsent(u, new HashSet<>());
+        reverseAdj.get(v).add(u);
+
     }
 
     /**
@@ -127,71 +117,42 @@ public class GraphEngine implements GraphService {
         final long startNano = System.nanoTime();
         this.lock.writeLock().lock();
         try {
-            if (!adj.containsKey(u))
-                return;
-            adj.get(u).remove(v);
-            if (this.precomputeMode)
-                this.graphChanged = true;
+            deleteEdgeInternal(u, v);
         } finally {
             long duration = System.nanoTime() - startNano;
-
             this.lock.writeLock().unlock();
             simulateDelay();
             log("D", u, v, startNano, duration);
         }
+    }
 
+    private void deleteEdgeInternal(int u, int v) {
+        if (this.adj.containsKey(u)) {
+            this.adj.get(u).remove(v);
+        }
+        if (this.reverseAdj.containsKey(v)) {
+            this.reverseAdj.get(v).remove(u);
+        }
     }
 
     /**
      * Processes a batch of operations and returns the results.
-     * 
-     * <p>
-     * Thread-safe: Multiple client threads can call this method simultaneously.
-     * Lock granularity within individual operations (query, addEdge, deleteEdge)
-     * ensures:
-     * <ul>
-     * <li>Only one write operation at a time</li>
-     * <li>Concurrent reads when no write is in progress</li>
-     * <li>In-order processing of each client's operations</li>
-     * </ul>
      * 
      * @param operations the operations to process
      * @return an array of integers representing the results of query operations
      */
     @Override
     public Integer[] processBatch(Operation[] operations) throws RemoteException {
-        if (this.precomputeMode) {
-            this.lock.writeLock().lock();
-            try {
-                if (this.graphChanged) {
-                    computeAllPaths();
-                    this.graphChanged = false;
-                }
-            } finally {
-                this.lock.writeLock().unlock();
-            }
-        }
-
         List<Integer> result = new ArrayList<>(operations.length);
 
         for (Operation op : operations) {
             switch (op.operationType()) {
-                case 'Q':
-                    result.add(query(op.u(), op.v()));
-                    break;
-                case 'A':
-                    addEdge(op.u(), op.v());
-                    break;
-                case 'D':
-                    deleteEdge(op.u(), op.v());
-                    break;
-                default:
-                    break;
+                case 'Q' -> result.add(query(op.u(), op.v()));
+                case 'A' -> addEdge(op.u(), op.v());
+                case 'D' -> deleteEdge(op.u(), op.v());
+                default -> System.err.println("Invalid operation: " + op.operationType());
             }
         }
-
-        this.logger.flush();
-
         return result.toArray(new Integer[0]);
     }
 
@@ -215,6 +176,7 @@ public class GraphEngine implements GraphService {
             return new Integer[] { u };
         if (!adj.containsKey(u) || !adj.containsKey(v))
             return null;
+
         Set<Integer> visited = new HashSet<>();
         Queue<Integer> queue = new LinkedList<>();
         Map<Integer, Integer> parent = new HashMap<>();
@@ -254,69 +216,80 @@ public class GraphEngine implements GraphService {
         return path.toArray(new Integer[0]);
     }
 
-    /**
-     * Runs BFS from node u on all nodes in the graph, and returns a map of the
-     * shortest distances from u to all nodes in the graph.
-     * takes time complexity of O(V+E) to calculate the distances from a single node
-     * to all nodes in the graph
-     * 
-     * @param u        the starting node
-     * @param allNodes the set of all nodes in the graph
-     * @return a map of the shortest distances from u to all nodes in the graph
-     */
-    private Map<Integer, Integer> BFSAllPairs(int u, Set<Integer> allNodes) {
-        Map<Integer, Integer> distances = new HashMap<>();
+    private Integer[] bidirectionalBFS(int u, int v) {
+        if (u == v)
+            return new Integer[] { u };
+        if (!adj.containsKey(u) || !adj.containsKey(v))
+            return null;
 
-        distances.put(u, 0);
+        Set<Integer> forwardVisited = new HashSet<>();
+        Set<Integer> backwardVisited = new HashSet<>();
+        Queue<Integer> forwardQueue = new LinkedList<>();
+        Queue<Integer> backwardQueue = new LinkedList<>();
+        Map<Integer, Integer> forwardParent = new HashMap<>();
+        Map<Integer, Integer> backwardParent = new HashMap<>();
 
-        Set<Integer> visited = new HashSet<>();
-        Queue<Integer> queue = new LinkedList<>();
+        forwardVisited.add(u);
+        forwardQueue.add(u);
+        backwardVisited.add(v);
+        backwardQueue.add(v);
 
-        visited.add(u);
-        queue.add(u);
+        Integer meeting = null;
 
-        while (!queue.isEmpty()) {
-            int curr = queue.poll();
-            int currDistance = distances.get(curr);
-
-            for (Integer neighbor : this.adj.getOrDefault(curr, new HashSet<>())) {
-                if (!visited.contains(neighbor)) {
-                    visited.add(neighbor);
-                    distances.put(neighbor, currDistance + 1); // distace = parent distance + 1
-                    queue.add(neighbor);
-                }
-            }
+        while (!forwardQueue.isEmpty() && !backwardQueue.isEmpty()) {
+            meeting = expandFrontier(forwardQueue, forwardVisited, backwardVisited, adj, forwardParent);
+            if (meeting != null)
+                break;
+            meeting = expandFrontier(backwardQueue, backwardVisited, forwardVisited, reverseAdj, backwardParent);
+            if (meeting != null)
+                break;
         }
 
-        return distances;
+        if (meeting == null)
+            return null;
+        return reconstructBidirectionalPath(forwardParent, backwardParent, u, v, meeting);
     }
 
-    /**
-     * Computes the shortest path between all pairs of nodes in the graph, and
-     * stores the results in the precomputedPaths private map.
-     * takes time complexity of O(V * (V + E))
-     */
-    private void computeAllPaths() {
-
-        Set<Integer> allNodes = new HashSet<>(adj.keySet());
-        for (Set<Integer> neighbors : adj.values()) {
-            allNodes.addAll(neighbors);
-        }
-
-        Map<GraphService.Pair, Integer> temp = new ConcurrentHashMap<>(allNodes.size() * allNodes.size());
-
-        for (Integer u : allNodes) { // O(V) |
-            Map<Integer, Integer> distances = this.BFSAllPairs(u, allNodes); // O(V + E) | ==> O(V * (2 * V + E)) ~
-                                                                             // O(V^2 + E)
-            for (Integer v : allNodes) { // O(V) |
-                Integer distance = distances.get(v);
-                if (distance != null) {
-                    temp.put(new GraphService.Pair(u, v), distance);
+    private Integer expandFrontier(Queue<Integer> queue, Set<Integer> visitedOwn,
+        Set<Integer> visitedOther, Map<Integer, Set<Integer>> edges, Map<Integer, Integer> parents) {
+        int levelSize = queue.size();
+        for (int i = 0; i < levelSize; i++) {
+            int curr = queue.poll();
+            for (Integer neighbor:edges.getOrDefault(curr, new HashSet<>())) {
+                if (!visitedOwn.contains(neighbor)) {
+                    visitedOwn.add(neighbor);
+                    parents.put(neighbor, curr);
+                    queue.add(neighbor);
+                }
+                if (visitedOther.contains(neighbor)) {
+                    return neighbor;
                 }
             }
         }
+        return null;
+    }
 
-        this.precomputedPaths = temp;
+    private Integer[] reconstructBidirectionalPath(Map<Integer, Integer> forwardParent,
+                Map<Integer, Integer> backwardParent, int u, int v, Integer meeting) {
+        LinkedList<Integer> path = new LinkedList<>();
+
+        // meeting (curr) -> u
+        Integer curr = meeting;
+        while (curr != null) {
+            path.addFirst(curr);
+            if (curr == u) break;
+            curr = forwardParent.get(curr);
+        }
+
+        // meeting (curr) -> v
+        curr = backwardParent.get(meeting);
+        while (curr != null) {
+            path.addLast(curr);
+            if (curr == v) break;
+            curr = backwardParent.get(curr);
+        }
+
+        return path.toArray(new Integer[0]);
     }
 
     /**
@@ -334,27 +307,39 @@ public class GraphEngine implements GraphService {
      */
     public boolean loadFromFile(String filename) throws IllegalArgumentException {
         Map<Integer, Set<Integer>> tempAdj = new HashMap<>();
+        Map<Integer, Set<Integer>> tempRev = new HashMap<>();
+
         try (BufferedReader bf = new BufferedReader(new FileReader(new File(filename)))) {
             String line;
             while ((line = bf.readLine()) != null) {
-                if (line == null || line.trim().equals("")) {
-                    throw new IllegalArgumentException("Empty line in graph file or does not end with 'S'");
+                if (line == null || line.trim().isEmpty()) {
+                    continue;
                 }
 
                 if (line.trim().equals("S")) {
                     this.adj = tempAdj;
+                    this.reverseAdj = tempRev;
                     return true;
                 }
 
                 String[] tokens = line.trim().split("\\s+");
+                if (tokens.length < 2) continue;
+
                 int u = Integer.parseInt(tokens[0]);
                 int v = Integer.parseInt(tokens[1]);
+
                 tempAdj.putIfAbsent(u, new HashSet<>());
                 tempAdj.putIfAbsent(v, new HashSet<>());
+                
+                tempRev.putIfAbsent(u, new HashSet<>());
+                tempRev.putIfAbsent(v, new HashSet<>());
+                
                 tempAdj.get(u).add(v);
-
+                
+                tempRev.get(v).add(u);
+                
             }
-        } catch (IOException | NullPointerException e) {
+        } catch (IOException | NumberFormatException e) {
             System.err.println("Failed to load graph: " + e.getMessage());
         }
         return false;
@@ -382,15 +367,10 @@ public class GraphEngine implements GraphService {
         logger.print(line);
     }
 
-    public void setPrecomputedMode(boolean on) {
-        this.precomputeMode = on;
-        if (this.filename != null && this.adj.isEmpty()){
+    public void setBidirectionalMode(boolean bidirectionalMode) {
+        this.BidirectionalMode = bidirectionalMode;
+        if (this.filename != null && this.adj.isEmpty()) {
             loadFromFile(this.filename);
-        }
-        if (on) {
-            loadFromFile(this.filename);
-            computeAllPaths();
-            graphChanged = false;
         }
     }
 

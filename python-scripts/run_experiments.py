@@ -1,8 +1,6 @@
 """
 Automated performance experiment runner for Graph Service.
-Modifies system.properties, runs ./start.sh, collects logs, aggregates results,
-and plots the required performance graphs.
-
+Bidirectional-BFS variant vs unidirectional vanilla BFS variant.
 Usage:
   python run_experiments.py
 """
@@ -10,13 +8,10 @@ Usage:
 import os
 import shutil
 import subprocess
-import time
 import pandas as pd
-import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
-from typing import Dict, List, Optional
-import itertools
+from typing import Dict, Optional
 
 # ---------- Configuration ----------
 BASE_DIR = Path(os.path.dirname(os.path.abspath(__file__)))  # where this script is
@@ -27,32 +22,27 @@ LOG_DIR = PROJECT_DIR.joinpath("log")
 EXPERIMENTS_DIR = PROJECT_DIR.joinpath("experiments")
 PLOTS_DIR = PROJECT_DIR.joinpath("plots")
 
+
 # number of repetitions per configuration (to average)
-NUM_RUNS = 3 
+NUM_RUNS = 5 # 3 was bad
 
-WRITE_PERCENTAGES = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 99]#[0, 20, 50, 80, 99]
-CLIENT_COUNTS_BASIC = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-CLIENT_COUNTS_STRESS = [11, 12, 13, 14, 15, 16, 17, 18, 19, 20]   # for extra credit
+WRITE_PERCENTAGES = [k for k in range(0, 100, 10)]
+CLIENT_COUNTS_BASIC = [1, 2, 3, 4, 5]
+CLIENT_COUNTS_STRESS = [5, 7, 9, 11, 13, 15]   # for extra credit
+
 FREQ_LABELS = {
-    "t1": 0, 
-    "t2": 50,
-    "t3": 200,
-    "t4": 500,
-    "t5": 1000,
-    "t6": 5000,
-    "t7": 10000,
-    "t8": 50000,
-    "t9": 100000,
-    "t10": 500000,
-    "t11": 1000000
-
-    # "high": 0,      # 0 ms sleep = max frequency
-    # "medium": 50,
-    # "low": 200
+    "0 μs": 0,
+    "1 μs": 1_000,
+    "10 μs": 10_000,
+    "100 μs": 100_000,
+    "1 ms": 1_000_000,
+    "10 ms": 10_000_000,
+    "100 ms": 100_000_000,
 }
-VARIANTS = ["ondemand", "all"]
+VARIANTS = ["uni", "bi"]
 
 # ---------- 1. Helper Functions ----------
+
 def write_properties(properties: Dict[str, str], path: Path):
     """Write key=value pairs to a properties file."""
     with open(path, 'w') as f:
@@ -67,34 +57,46 @@ def base_properties() -> Dict[str, str]:
         "GSP.server.port": "49053",
         "GSP.rmiregistry.port": "1099",
         "GSP.serviceName": "GraphEngine",
-        "GSP.graph.file": "data/intial_graph.txt",
+        "GSP.graph.file": "graph/initial_graph.txt",
         "GSP.data.directory": "data/",
         "GSP.server.log.directory": "log/",
         "GSP.client.log.directory": "log/",
         "GSP.server.verbose": "true",
         "GSP.client.verbose": "true",
-        "GSP.batchMode": "true",
-        "GSP.operations.per.batch": "50",
-        "GSP.client.timeout.seconds": "120",
+        "GSP.batchMode": "false", 
+        "GSP.operations.per.batch": "500",
+        "GSP.client.timeout.seconds": "180",
         "GSP.server.operations.sleep": "0",
         "GSP.client.operations.sleep": "0"
     }
     
 def apply_config(props: dict, variant: str, write_pct: int,
-                 num_clients: int, sleep_ms: int):
+                 num_clients: int, sleep_ns: int):
     """Modify properties dict for a specific configuration."""
-    props["GSP.precomputeMode"] = "true" if variant == "all" else "false"
+    props["GSP.bidirectionalMode"] = "true" if variant == "bi" else "false"
     props["GSP.writePercent"] = str(write_pct)
     props["GSP.numberOfnodes"] = str(num_clients)
-    props["GSP.client.operations.sleep"] = str(sleep_ms)
+    props["GSP.client.operations.sleep"] = str(sleep_ns)
 
-    for i in range(num_clients):
-        key = f"GSP.node{i}"
-        if i < num_clients:
-            props[key] = "localhost"
-        elif key in props:
+    # remove existing nodes
+    for key in list(props.keys()):
+        if key.startswith("GSP.node") and key[8:].isdigit():
             del props[key]
-            
+    
+    for i in range(num_clients):
+        props[f"GSP.node{i}"] = "localhost"
+
+
+def compile_once():
+    print("Compiling...")
+    subprocess.run(["bash", "compile.sh"], cwd=PROJECT_DIR, timeout=60, check=True)
+
+
+def warmup():
+    print("Warming up...")         
+    for _ in range(2):
+        run_single_experiment("uni", 30, 3, 0, run_id=0)
+        run_single_experiment("bi", 30, 3, 0, run_id=0)   
             
 def run_system_and_wait():
     """Execute the start script and wait for it to finish.
@@ -111,7 +113,6 @@ def run_system_and_wait():
         if result.returncode != 0:
             print(f"ERROR running start.sh: {result.stderr}")
             return False
-        # print(result.stdout)
         return True
     except subprocess.TimeoutExpired:
         print("ERROR: start.sh timed out")
@@ -133,6 +134,7 @@ def parse_server_log(filepath: str) -> pd.DataFrame: # works and tested
     df = df.dropna(subset=["duration"])
     df["duration"] = df["duration"].astype(int)
     return df
+
 
 def compute_query_stats(server_df: pd.DataFrame) -> Dict[str, float]:
     """From server DataFrame (all operations), extract query (Q) statistics.
@@ -168,27 +170,27 @@ def compute_query_stats(server_df: pd.DataFrame) -> Dict[str, float]:
         "p95_duration_ns": p95,
         "qps": qps
     }
-
+    
 
 # ---------- 3. Single Experiment Run ----------
 def run_single_experiment(variant: str, write_pct: int,
-                          num_clients: int, sleep_ms: int,
-                          run_id: int) -> Optional[Dict]:
+                          num_clients: int, sleep_ns: int,
+                          run_id: int, batch_mode=True) -> Optional[Dict]:
     """
     Run one instance of the system with given config.
     Saves logs to experiments/<variant>/<config_name>/run<run_id>/
     Returns computed stats or None if failed.
     """
     # create config name
-    freq_label = [k for k, v in FREQ_LABELS.items() if v == sleep_ms][0] if sleep_ms in FREQ_LABELS.values() else "custom"
+    freq_label = [k for k, v in FREQ_LABELS.items() if v == sleep_ns][0] if sleep_ns in FREQ_LABELS.values() else "custom"
     config_name = f"freq_{freq_label}_write{write_pct}_nodes{num_clients}"
-    # run_dir = EXPERIMENTS_DIR / variant / config_name / f"run{run_id}"
     run_dir = EXPERIMENTS_DIR.joinpath(variant, config_name, f"run{run_id}")
     run_dir.mkdir(parents=True, exist_ok=True)
 
     # 1. Write properties
     props = base_properties()
-    apply_config(props, variant, write_pct, num_clients, sleep_ms)
+    props["GSP.batchMode"] = "true" if batch_mode else "false"
+    apply_config(props, variant, write_pct, num_clients, sleep_ns)
     write_properties(props, PROPERTIES_FILE)
 
     # 2. Clean old logs
@@ -197,7 +199,7 @@ def run_single_experiment(variant: str, write_pct: int,
             f.unlink()
 
     # 3. Run system
-    print(f"Running: {variant} write={write_pct}% nodes={num_clients} sleep={sleep_ms}ns run={run_id} ...")
+    print(f"Running: {variant} write={write_pct}% nodes={num_clients} sleep={sleep_ns}ns run={run_id} ...")
     success = run_system_and_wait()
     if not success:
         print("  Run failed, skipping.")
@@ -216,13 +218,14 @@ def run_single_experiment(variant: str, write_pct: int,
         return None
     df = parse_server_log(server_log)
     stats = compute_query_stats(df)
+    
 
     # add metadata
     stats["variant"] = variant
     stats["write_pct"] = write_pct
     stats["num_clients"] = num_clients
     stats["freq_label"] = freq_label
-    stats["sleep_ms"] = sleep_ms
+    stats["sleep_ns"] = sleep_ns
     stats["run"] = run_id
     return stats
 
@@ -234,42 +237,47 @@ def run_all_experiments():
 
     # --- Plot 1: Response time vs frequency ---
     # Fix write% and nodes, vary frequency
+    print("Plot 1: Response time vs frequency")
     for variant in VARIANTS:
-        for label, sleep_ms in FREQ_LABELS.items():
+        for label, sleep_ns in FREQ_LABELS.items():
             for run in range(1, NUM_RUNS+1):
                 stats = run_single_experiment(variant, write_pct=30,
-                                              num_clients=3, sleep_ms=sleep_ms,
-                                              run_id=run)
+                                              num_clients=3, sleep_ns=sleep_ns,
+                                              run_id=run, batch_mode=False)
                 if stats:
                     all_stats.append(stats)
 
     # --- Plot 2: Response time vs write percentage ---
+    # Fix frequency and nodes, vary write%
+    print("Plot 2: Response time vs write percentage")
     for variant in VARIANTS:
         for wp in WRITE_PERCENTAGES:
             for run in range(1, NUM_RUNS+1):
                 stats = run_single_experiment(variant, write_pct=wp,
-                                              num_clients=3, sleep_ms=0,  # high freq
-                                              run_id=run)
+                                              num_clients=3, sleep_ns=0,  # high freq
+                                              run_id=run, batch_mode=True)
                 if stats:
                     all_stats.append(stats)
 
     # --- Plot 3: Response time vs number of clients [1,5] ---
+    print("Plot 3: Response time vs number of clients")
     for variant in VARIANTS:
         for nc in CLIENT_COUNTS_BASIC:
             for run in range(1, NUM_RUNS+1):
                 stats = run_single_experiment(variant, write_pct=30,
-                                              num_clients=nc, sleep_ms=0,
-                                              run_id=run)
+                                              num_clients=nc, sleep_ns=0,
+                                              run_id=run, batch_mode=True)
                 if stats:
                     all_stats.append(stats)
 
     # --- Extra credit: stress test (5-15) ---
+    print("Extra credit: stress test")
     for variant in VARIANTS:
         for nc in CLIENT_COUNTS_STRESS:
             for run in range(1, NUM_RUNS+1):
                 stats = run_single_experiment(variant, write_pct=30,
-                                              num_clients=nc, sleep_ms=0,
-                                              run_id=run)
+                                              num_clients=nc, sleep_ns=0,
+                                              run_id=run, batch_mode=True)
                 if stats:
                     all_stats.append(stats)
 
@@ -283,91 +291,103 @@ def run_all_experiments():
 def aggregate_and_plot(df: pd.DataFrame):
     """Average over runs and produce the three required plots."""
     # Group by configuration, compute mean of metrics
-    group_cols = ["variant", "write_pct", "num_clients", "freq_label", "sleep_ms"]
+    group_cols = ["variant", "write_pct", "num_clients", "freq_label", "sleep_ns"]
 
     agg_df = df.groupby(group_cols).agg(
-        avg_duration_ns=("avg_duration_ns", "mean"),
-        median_duration_ns=("median_duration_ns", "mean"),
-        p95_duration_ns=("p95_duration_ns", "mean"),
-        qps=("qps", "mean"),
+        avg_duration_ns=("avg_duration_ns", "median"),
+        avg_std=("avg_duration_ns", lambda x: x.std()),
+        median_duration_ns=("median_duration_ns", "median"),
+        p95_duration_ns=("p95_duration_ns", "median"),
+        qps=("qps", "median"),
     ).reset_index()
 
+    for col in ["avg_duration_ns", "avg_std", "median_duration_ns", "p95_duration_ns"]:
+        agg_df[col] = agg_df[col] / 1000.0
+
     # Save aggregated table
-    # agg_df.to_csv(EXPERIMENTS_DIR / "aggregated_stats.csv", index=False)
     agg_df.to_csv(EXPERIMENTS_DIR.joinpath("aggregated_stats.csv"), index=False)
 
     # Plotting
     PLOTS_DIR.mkdir(parents=True, exist_ok=True)
     plt.style.use('ggplot')
+    
 
     # --- Plot 1: Response time vs frequency ---
-    freq_order = list(FREQ_LABELS.keys())  # ["high", "medium", "low"]
+    freq_order = list(FREQ_LABELS.keys())
     df_freq = agg_df[(agg_df["write_pct"] == 30) & (agg_df["num_clients"] == 3)]
     fig, ax = plt.subplots()
     for variant in VARIANTS:
-        sub = df_freq[df_freq["variant"] == variant]
-        if sub.empty: continue
-        sub.loc[:, "freq_cat"] = pd.Categorical(sub["freq_label"], categories=freq_order, ordered=True)
-        sub = sub.sort_values("freq_cat")
-        ax.plot(sub["freq_cat"], sub["avg_duration_ns"], marker='o', label=variant)
-    ax.set_xlabel("Request Frequency (sleep ms)")
-    ax.set_ylabel("Avg Query Response Time (ns)")
+        sub = df_freq[df_freq["variant"] == variant].copy()
+        if sub.empty: 
+            continue
+        sub = sub.sort_values("sleep_ns")
+        ax.errorbar(sub["freq_label"], sub["avg_duration_ns"], yerr=sub["avg_std"],
+                    marker='o', label=variant, capsize=3)
+    ax.set_xlabel("Inter-Request Sleep")
+    ax.set_ylabel("Avg Query Response Time (μs)")
     ax.set_title("Response Time vs. Frequency")
     ax.legend()
     fig.tight_layout()
-    # fig.savefig(PLOTS_DIR / "response_time_vs_frequency.png")
     fig.savefig(PLOTS_DIR.joinpath("response_time_vs_frequency.png"))
     plt.close(fig)
     print("Saved response_time_vs_frequency.png")
-
+    
     # --- Plot 2: Response time vs write percentage ---
-    df_write = agg_df[(agg_df["num_clients"] == 3) & (agg_df["sleep_ms"] == 0)]  # high freq
+    df_write = agg_df[(agg_df["num_clients"] == 3) & (agg_df["sleep_ns"] == 0)]
     fig, ax = plt.subplots()
     for variant in VARIANTS:
         sub = df_write[df_write["variant"] == variant].sort_values("write_pct")
-        if sub.empty: continue
-        ax.plot(sub["write_pct"], sub["avg_duration_ns"], marker='s', label=variant)
+        if sub.empty:
+            continue
+        ax.set_xticks(sub["write_pct"].unique())
+        ax.errorbar(sub["write_pct"], sub["avg_duration_ns"], yerr=sub["avg_std"],
+                    marker='s', label=variant, capsize=3)
     ax.set_xlabel("Write Percentage (%)")
-    ax.set_ylabel("Avg Query Response Time (ns)")
+    ax.set_ylabel("Avg Query Response Time (μs)")
     ax.set_title("Response Time vs. Write Percentage")
     ax.legend()
     fig.tight_layout()
-    # fig.savefig(PLOTS_DIR / "response_time_vs_write_pct.png")
     fig.savefig(PLOTS_DIR.joinpath("response_time_vs_write_pct.png"))
     plt.close(fig)
     print("Saved response_time_vs_write_pct.png")
 
     # --- Plot 3: Response time vs number of clients (basic) ---
-    df_clients = agg_df[(agg_df["write_pct"] == 30) & (agg_df["sleep_ms"] == 0)]
+    df_clients = agg_df[(agg_df["write_pct"] == 30) & (agg_df["sleep_ns"] == 0) &
+                        (agg_df["num_clients"] <= CLIENT_COUNTS_BASIC[-1])]
     fig, ax = plt.subplots()
     for variant in VARIANTS:
         sub = df_clients[df_clients["variant"] == variant].sort_values("num_clients")
-        if sub.empty: continue
-        ax.plot(sub["num_clients"], sub["avg_duration_ns"], marker='D', label=variant)
+        if sub.empty:
+            continue
+        ax.set_xticks(sub["num_clients"].unique())
+        ax.errorbar(sub["num_clients"], sub["avg_duration_ns"], yerr=sub["avg_std"],
+                    marker='D', label=variant, capsize=3)
     ax.set_xlabel("Number of Clients")
-    ax.set_ylabel("Avg Query Response Time (ns)")
+    ax.set_ylabel("Avg Query Response Time (μs)")
     ax.set_title("Response Time vs. Number of Clients")
     ax.legend()
     fig.tight_layout()
-    # fig.savefig(PLOTS_DIR / "response_time_vs_num_clients.png")
     fig.savefig(PLOTS_DIR.joinpath("response_time_vs_num_clients.png"))
     plt.close(fig)
     print("Saved response_time_vs_num_clients.png")
 
     # Optional: stress plot
-    df_stress = df_clients[df_clients["num_clients"] >= 5]
+    df_stress = agg_df[(agg_df["write_pct"] == 30) & (agg_df["sleep_ns"] == 0) &
+                       (agg_df["num_clients"] >= CLIENT_COUNTS_STRESS[0])]
     if not df_stress.empty:
         fig, ax = plt.subplots()
         for variant in VARIANTS:
             sub = df_stress[df_stress["variant"] == variant].sort_values("num_clients")
-            if sub.empty: continue
-            ax.plot(sub["num_clients"], sub["avg_duration_ns"], marker='D', label=variant)
+            if sub.empty:
+                continue
+            ax.set_xticks(sub["num_clients"].unique())
+            ax.errorbar(sub["num_clients"], sub["avg_duration_ns"], yerr=sub["avg_std"],
+                        marker='D', label=variant, capsize=3)
         ax.set_xlabel("Number of Clients (Stress)")
-        ax.set_ylabel("Avg Query Response Time (ns)")
+        ax.set_ylabel("Avg Query Response Time (μs)")
         ax.set_title("Response Time vs. Number of Clients (Stress Test)")
         ax.legend()
         fig.tight_layout()
-        # fig.savefig(PLOTS_DIR / "response_time_vs_num_clients_stress.png")
         fig.savefig(PLOTS_DIR.joinpath("response_time_vs_num_clients_stress.png"))
         plt.close(fig)
         print("Saved stress plot.")
@@ -375,12 +395,14 @@ def aggregate_and_plot(df: pd.DataFrame):
 # ---------- Main ----------
 if __name__ == "__main__":
     # Run experiments (this takes a long time)
+    compile_once()
+    warmup()
     df_raw = run_all_experiments()
 
     # Aggregate and plot
     if not df_raw.empty:
         aggregate_and_plot(df_raw)
     else:
-        print("No data collected. Check errors above.")
+        print("No data collected.")
 
     print("Done.")

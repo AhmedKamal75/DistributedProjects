@@ -59,17 +59,16 @@ public class Server {
      * @param port           the port on which the server is running
      * @param rmiPort        the port on which the rmiregistry is running
      * @param serviceName    the name of the stub on the rmiregistry
-     * @param precomputeMode true if precompute mode is enabled (asap), false
-     *                       otherwise (ondemand)
+     * @param BidirectionalMode true if bidirectional mode is enabled, false for vanilla BFS
      */
     public void run(String graphFile, String hostname, int port, int rmiPort, String serviceName,
-            boolean precomputeMode) {
+            boolean BidirectionalMode) {
         try {
             // the server on which the stup is running
             System.setProperty("java.rmi.server.hostname", hostname);
 
             this.engine = new GraphEngine(graphFile, this.logFilePath, this.verbose, this.simulatedDelayMs);
-            this.engine.setPrecomputedMode(precomputeMode);
+            this.engine.setBidirectionalMode(BidirectionalMode);
 
             // this server stup is registered with rmiregistry on port serverPort.
             GraphService stub = (GraphService) UnicastRemoteObject.exportObject(this.engine, port);

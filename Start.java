@@ -138,14 +138,14 @@ public class Start {
         String serviceName = properties.getProperty("GSP.serviceName");
         String serverLogFile = properties.getProperty("GSP.server.log.directory") + "server-log.txt";
         boolean serverVerbose = Boolean.parseBoolean(properties.getProperty("GSP.server.verbose"));
-        boolean precomputeMode = Boolean.parseBoolean(properties.getProperty("GSP.precomputeMode"));
+        boolean bidirectionalMode = Boolean.parseBoolean(properties.getProperty("GSP.bidirectionalMode"));
         int serverDelayMs = Integer.parseInt(properties.getProperty("GSP.server.operations.sleep"));
 
         Server server = new Server("server1", serverLogFile, serverVerbose, serverDelayMs);
 
         Thread serverThread = new Thread(() -> {
             try {
-                server.run(graphFile, serverHost, serverPort, rmiPort, serviceName, precomputeMode);
+                server.run(graphFile, serverHost, serverPort, rmiPort, serviceName, bidirectionalMode);
             } catch (Exception e) {
                 System.err.println("Failed to start server thread: " + e.getMessage());
             }

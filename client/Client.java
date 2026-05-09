@@ -12,6 +12,7 @@ import java.rmi.registry.LocateRegistry;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.locks.LockSupport;
 
 import shared.GraphService;
 
@@ -78,7 +79,8 @@ public class Client {
 
                 long endNano = System.nanoTime();
                 long duration = endNano - startNano;
-                this.log(null, startNano, endNano, duration, "Batch Size: " + ops.size());
+                long queryCount = ops.stream().filter(op->op.operationType() == 'Q').count();
+                this.log(null, startNano, endNano, duration, "Batch Size: " + ops.size() + ", Queries: " + queryCount);
             } else {
                 for (GraphService.Operation op : ops) {
                     final long startNano = System.nanoTime();
@@ -100,7 +102,11 @@ public class Client {
                     long duration = endNano - startNano;
                     this.log(op, startNano, endNano, duration, null);
                     if (this.maxSleep > 0) {
-                        Thread.sleep(ThreadLocalRandom.current().nextInt(this.maxSleep + 1));
+                        long sleepNs = ThreadLocalRandom.current().nextInt(this.maxSleep + 1);
+                        if (sleepNs > 0) {
+                            LockSupport.parkNanos(sleepNs);
+                        }
+                        // Thread.sleep(ThreadLocalRandom.current().nextInt(this.maxSleep + 1));
                     }
                 }
             }

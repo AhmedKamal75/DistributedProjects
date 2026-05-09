@@ -3,11 +3,11 @@ set -euo pipefail
 
 usage() {
   cat <<EOF
-Usage: $0 [ondemand|all]
+Usage: $0 [uni|bi]
 Runs CorrectnessHarness with stdin-driven engine input.
 
-  ondemand  - calculate results on demand
-  all       - precompute all results beforehand
+  uni      - for the uni-directional mode (BFS)
+  bi       - for the bi-directional BFS mode
 EOF
 }
 
@@ -17,7 +17,7 @@ if [ $# -ne 1 ]; then
 fi
 
 mode="${1,,}"
-if [[ "$mode" != "ondemand" && "$mode" != "all" ]]; then
+if [[ "$mode" != "uni" && "$mode" != "bi" ]]; then
   usage
   exit 1
 fi
